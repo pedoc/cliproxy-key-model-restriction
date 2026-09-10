@@ -16,14 +16,17 @@ chmod +x build.sh
 ./build.sh
 ```
 
-Requires Go 1.26+ with CGO enabled (the plugin uses cgo to export the host ABI).
+Or manually:
+```bash
+gcc -shared -fPIC -O2 -o key-model-restriction-c.so c/src/plugin.c
+```
 
 ## Install
 
 Copy the compiled `.so` file to your CLIProxyAPI plugins directory:
 
 ```bash
-cp key_model_restriction.so /path/to/CLIProxyAPI/plugins/
+cp key-model-restriction-c.so /path/to/CLIProxyAPI/plugins/
 ```
 
 ## Configuration
@@ -31,15 +34,11 @@ cp key_model_restriction.so /path/to/CLIProxyAPI/plugins/
 In your `config.yaml`:
 
 ```yaml
-api-keys:
-  - sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  - sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-
 plugins:
   enabled: true
-  dir: ./plugins
+  dir: "plugins"
   configs:
-    key-model-restriction:
+    key-model-restriction-c:
       enabled: true
       priority: 100
       config_yaml: |
@@ -59,7 +58,19 @@ plugins:
 
 1. The host's `config-api-key` provider validates the API key.
 2. The host hashes the key into `caller_scope` and puts it in request metadata.
-3. This plugin's `InterceptRequestAfterAuth` hook reads `caller_scope`, looks up the key's allowed models, and terminates the request with 403 if the model is not allowed.
+3. This plugin's `request.intercept_after` hook reads `caller_scope`, looks up the key's allowed models, and terminates the request with 403 if the model is not allowed.
+
+## Project Structure
+
+```
+cliproxy-key-model-restriction/
+├── c/
+│   ├── CMakeLists.txt
+│   └── src/
+│       └── plugin.c
+├── build.sh
+└── README.md
+```
 
 ## License
 

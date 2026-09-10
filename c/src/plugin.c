@@ -139,6 +139,37 @@ static char* json_escape(const char* value) {
     return out;
 }
 
+static int base64_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static char* base64_decode(const char* input, size_t* out_len) {
+    size_t len = input == NULL ? 0 : strlen(input);
+    char* out = (char*)malloc(((len * 3) / 4) + 4);
+    if (out == NULL) return NULL;
+    int value = 0, bits = -8;
+    size_t pos = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (input[i] == '=') break;
+        int digit = base64_value(input[i]);
+        if (digit < 0) continue;
+        value = (value << 6) | digit;
+        bits += 6;
+        if (bits >= 0) {
+            out[pos++] = (char)((value >> bits) & 0xFF);
+            bits -= 8;
+        }
+    }
+    out[pos] = '\0';
+    *out_len = pos;
+    return out;
+}
+
 static char* extract_json_string(const char* json, const char* key) {
     if (json == NULL || key == NULL) return NULL;
     char* pattern = (char*)malloc(strlen(key) + 3);
@@ -392,11 +423,16 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             json[request_len] = '\0';
         }
         if (json) {
-            // Extract config_yaml from the request envelope
-            char* config_yaml = extract_json_string(json, "config_yaml");
-            if (config_yaml) {
-                parse_config(config_yaml);
-                free(config_yaml);
+            // Extract config_yaml from the request envelope (base64-encoded by host)
+            char* config_yaml_b64 = extract_json_string(json, "config_yaml");
+            if (config_yaml_b64) {
+                size_t decoded_len = 0;
+                char* config_yaml = base64_decode(config_yaml_b64, &decoded_len);
+                if (config_yaml) {
+                    parse_config(config_yaml);
+                    free(config_yaml);
+                }
+                free(config_yaml_b64);
             }
             free(json);
         }
@@ -426,11 +462,11 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
-        // Extract model
-        char* model = extract_json_string(json, "Model");
-        if (!model) model = extract_json_string(json, "RequestedModel");
+        // Extract model (JSON field is "model" lowercase)
+        char* model = extract_json_string(json, "model");
+        if (!model) model = extract_json_string(json, "requested_model");
         // Extract caller_scope from metadata
-        char* metadata = extract_json_object(json, "Metadata");
+        char* metadata = extract_json_object(json, "metadata");
         char* caller_scope = NULL;
         if (metadata) {
             caller_scope = extract_json_string(metadata, "caller_scope");
