@@ -156,17 +156,26 @@ func handleRegister(request []byte) ([]byte, error) {
 	}
 
 	// Return registration with request_interceptor capability
-	meta := pluginapi.Metadata{
-		Name:             "key-model-restriction",
-		Version:          "1.0.0",
-		Author:           "cliproxy-plugin",
-		GitHubRepository: "https://github.com/router-for-me/cliproxy-key-model-restriction",
+	// Use a custom struct (like the official example) because pluginapi.Capabilities
+	// contains interface types that don't marshal to JSON booleans correctly.
+	type caps struct {
+		RequestInterceptor bool `json:"request_interceptor"`
 	}
-	return okEnvelope(pluginapi.Plugin{
-		Metadata:      meta,
+	type regResponse struct {
+		SchemaVersion uint32             `json:"schema_version"`
+		Metadata      pluginapi.Metadata `json:"metadata"`
+		Capabilities  caps               `json:"capabilities"`
+	}
+	return okEnvelope(regResponse{
 		SchemaVersion: pluginabi.SchemaVersion,
-		Capabilities: pluginapi.Capabilities{
-			RequestInterceptor: pluginapi.RequestInterceptor(nil),
+		Metadata: pluginapi.Metadata{
+			Name:             "key-model-restriction",
+			Version:          "1.0.0",
+			Author:           "cliproxy-plugin",
+			GitHubRepository: "https://github.com/router-for-me/cliproxy-key-model-restriction",
+		},
+		Capabilities: caps{
+			RequestInterceptor: true,
 		},
 	})
 }
