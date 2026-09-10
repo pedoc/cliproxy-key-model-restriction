@@ -98,20 +98,22 @@ static void sha256_raw(const uint8_t* data, size_t len, uint8_t out[32]) {
 }
 
 static char* hash_key(const char* key) {
-    const char* prefix = "cli-proxy-api:caller-scope:v1\x00";
-    size_t plen = strlen(prefix);
+    // Prefix includes a null byte - use sizeof to get the correct length
+    // because strlen would stop at the null byte
+    const char prefix[] = "cli-proxy-api:caller-scope:v1\x00";
+    size_t plen = sizeof(prefix) - 1;  // 29 bytes (excluding trailing null terminator from sizeof)
     size_t klen = strlen(key);
-    char* combined = (char*)malloc(plen + klen + 1);
+    uint8_t hash[32];
+    // Hash prefix + key as a single input (prefix includes the null byte)
+    uint8_t* combined = (uint8_t*)malloc(plen + klen);
     memcpy(combined, prefix, plen);
     memcpy(combined + plen, key, klen);
-    combined[plen + klen] = '\0';
-    uint8_t hash[32];
-    sha256_raw((const uint8_t*)combined, plen + klen, hash);
+    sha256_raw(combined, plen + klen, hash);
     free(combined);
-    char* hex = (char*)malloc(65);
-    for (int i = 0; i < 32; i++) sprintf(hex + i*2, "%02x", hash[i]);
-    hex[64] = '\0';
-    return hex;
+    char* hex_out = (char*)malloc(65);
+    for (int i = 0; i < 32; i++) sprintf(hex_out + i*2, "%02x", hash[i]);
+    hex_out[64] = '\0';
+    return hex_out;
 }
 
 // ============================================================================
@@ -119,6 +121,29 @@ static char* hash_key(const char* key) {
 // ============================================================================
 
 static int ispace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+static const char BASE64_TABLE[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static char* base64_encode_str(const char* data, size_t len) {
+    size_t out_len = ((len + 2) / 3) * 4;
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) return NULL;
+    size_t i = 0, j = 0;
+    while (i < len) {
+        uint32_t octet_a = i < len ? (unsigned char)data[i++] : 0;
+        uint32_t octet_b = i < len ? (unsigned char)data[i++] : 0;
+        uint32_t octet_c = i < len ? (unsigned char)data[i++] : 0;
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+        out[j++] = BASE64_TABLE[(triple >> 18) & 0x3F];
+        out[j++] = BASE64_TABLE[(triple >> 12) & 0x3F];
+        out[j++] = BASE64_TABLE[(triple >> 6) & 0x3F];
+        out[j++] = BASE64_TABLE[triple & 0x3F];
+    }
+    if (len % 3 == 1) { out[out_len - 2] = '='; out[out_len - 1] = '='; }
+    else if (len % 3 == 2) { out[out_len - 1] = '='; }
+    out[out_len] = '\0';
+    return out;
+}
 
 static char* json_escape(const char* value) {
     if (value == NULL) return strdup("");
@@ -462,43 +487,42 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
-        // Extract model (JSON field is "model" lowercase)
-        char* model = extract_json_string(json, "model");
-        if (!model) model = extract_json_string(json, "requested_model");
+        // Extract model (JSON fields are PascalCase: "Model", "RequestedModel")
+        char* model = extract_json_string(json, "Model");
+        if (!model) model = extract_json_string(json, "RequestedModel");
         // Extract caller_scope from metadata
-        char* metadata = extract_json_object(json, "metadata");
+        char* metadata = extract_json_object(json, "Metadata");
         char* caller_scope = NULL;
         if (metadata) {
             caller_scope = extract_json_string(metadata, "caller_scope");
         }
         if (!caller_scope || strlen(caller_scope) == 0 || !model || strlen(model) == 0) {
-            // No scope or model, pass through
             free(model); free(caller_scope); free(metadata); free(json);
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
         const KeyConfig* kc = find_key_config(caller_scope);
         if (!kc) {
-            // Key not in config, pass through
             free(model); free(caller_scope); free(metadata); free(json);
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
         if (!model_allowed(kc, model)) {
-            // Block the request
             char* model_esc = json_escape(model);
             char* body = format_string(
                 "{\"error\":{\"type\":\"forbidden\",\"message\":\"API key is not allowed to use model: %s\"}}",
                 model_esc ? model_esc : model);
+            // Base64-encode the response body (Go's []byte is base64 in JSON)
+            size_t body_len = strlen(body);
+            char* body_b64 = base64_encode_str(body, body_len);
             char* result = format_string(
                 "{\"ok\":true,\"result\":{\"terminate\":true,\"status_code\":403,\"response_body\":\"%s\"}}",
-                body ? body : "{}");
+                body_b64 ? body_b64 : "");
             write_response(response, result);
-            free(model_esc); free(body); free(result);
+            free(model_esc); free(body); free(body_b64); free(result);
             free(model); free(caller_scope); free(metadata); free(json);
             return 0;
         }
-        // Allowed, pass through
         free(model); free(caller_scope); free(metadata); free(json);
         write_response(response, "{\"ok\":true,\"result\":{}}");
         return 0;
