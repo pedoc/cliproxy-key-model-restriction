@@ -1,0 +1,7 @@
+*.so
+*.o
+*.a
+*.exe
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,13 @@
+{
+  "keys": {
+    "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+      "allowed_models": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet"]
+    },
+    "sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+      "allowed_models": []
+    },
+    "sk-cccccccccccccccccccccccccccccccc": {
+      "allowed_models": ["claude-3-opus"]
+    }
+  }
+}
