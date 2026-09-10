@@ -5,36 +5,34 @@ package main
 #include <stdlib.h>
 
 typedef struct {
-    void* ptr;
-    size_t len;
+	void* ptr;
+	size_t len;
 } cliproxy_buffer;
 
 typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
 typedef void (*cliproxy_host_free_fn)(void*, size_t);
 
 typedef struct {
-    uint32_t abi_version;
-    void* host_ctx;
-    cliproxy_host_call_fn call;
-    cliproxy_host_free_fn free_buffer;
+	uint32_t abi_version;
+	void* host_ctx;
+	cliproxy_host_call_fn call;
+	cliproxy_host_free_fn free_buffer;
 } cliproxy_host_api;
 
-typedef int (*cliproxy_plugin_call_fn)(const char*, const uint8_t*, size_t, cliproxy_buffer*);
+typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
 typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
 typedef void (*cliproxy_plugin_shutdown_fn)(void);
 
 typedef struct {
-    uint32_t abi_version;
-    cliproxy_plugin_call_fn call;
-    cliproxy_plugin_free_fn free_buffer;
-    cliproxy_plugin_shutdown_fn shutdown;
+	uint32_t abi_version;
+	cliproxy_plugin_call_fn call;
+	cliproxy_plugin_free_fn free_buffer;
+	cliproxy_plugin_shutdown_fn shutdown;
 } cliproxy_plugin_api;
 
-extern int cliproxy_plugin_init(cliproxy_host_api* host, cliproxy_plugin_api* plugin);
-extern int cliproxy_plugin_call(char* method, uint8_t* request, size_t request_len, cliproxy_buffer* response);
-extern void cliproxy_plugin_free(void* ptr, size_t len);
-extern void cliproxy_plugin_shutdown();
-
+extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
+extern void cliproxyPluginFree(void*, size_t);
+extern void cliproxyPluginShutdown(void);
 */
 import "C"
 
@@ -45,8 +43,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"unsafe"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // ============================================================================
@@ -55,14 +55,11 @@ import (
 
 // KeyModelConfig describes model restrictions for a single API key.
 type KeyModelConfig struct {
-	// AllowedModels is a list of model names the key may use.
-	// Empty or nil means no restriction (all models allowed).
 	AllowedModels []string `json:"allowed_models"`
 }
 
 // PluginConfig is the top-level plugin configuration.
 type PluginConfig struct {
-	// Keys maps raw API keys to their model restrictions.
 	Keys map[string]KeyModelConfig `json:"keys"`
 }
 
@@ -71,188 +68,165 @@ type PluginConfig struct {
 // ============================================================================
 
 var (
-	config   PluginConfig
-	configMu sync.RWMutex
+	config PluginConfig
 )
 
 // ============================================================================
-// Exported plugin functions (called by the host via C ABI)
+// Exported plugin functions
 // ============================================================================
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
-	if host == nil || plugin == nil {
-		return -1
+	if plugin == nil {
+		return 1
 	}
-
-	// Fill in the plugin function table
-	plugin.abi_version = C.uint32_t(1) // ABIVersion = 1
-	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxy_plugin_call)
-	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxy_plugin_free)
-	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxy_plugin_shutdown)
-
+	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
+	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
+	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
+	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
 	return 0
 }
 
-//export cliproxy_plugin_call
-func cliproxy_plugin_call(method *C.char, request *C.uint8_t, request_len C.size_t, response *C.cliproxy_buffer) C.int {
-	if method == nil || response == nil {
-		return -1
+//export cliproxyPluginCall
+func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
+	if response != nil {
+		response.ptr = nil
+		response.len = 0
 	}
-
-	m := C.GoString(method)
-	req := C.GoBytes(unsafe.Pointer(request), C.int(request_len))
-
-	var result []byte
-	switch m {
-	case "plugin.register", "plugin.reconfigure":
-		result = handleRegister(req)
-	case "request.intercept_before":
-		result = handleInterceptBeforeAuth(req)
-	case "request.intercept_after":
-		result = handleInterceptAfterAuth(req)
-	default:
-		result = marshalError("unknown_method", "unsupported method: "+m)
+	if method == nil {
+		writeResponse(response, errorEnvelope("invalid_method", "method is required"))
+		return 1
 	}
-
-	// Allocate response buffer using C malloc (host will free it via cliproxy_plugin_free)
-	if len(result) > 0 {
-		cstr := C.CString(string(result))
-		response.ptr = unsafe.Pointer(cstr)
-		response.len = C.size_t(len(result))
+	var requestBytes []byte
+	if request != nil && requestLen > 0 {
+		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
+	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
+	if errHandle != nil {
+		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+		return 1
+	}
+	writeResponse(response, raw)
 	return 0
 }
 
-//export cliproxy_plugin_free
-func cliproxy_plugin_free(ptr unsafe.Pointer, len C.size_t) {
+//export cliproxyPluginFree
+func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 	if ptr != nil {
 		C.free(ptr)
 	}
 }
 
-//export cliproxy_plugin_shutdown
-func cliproxy_plugin_shutdown() {
-	// Clean up resources
-}
+//export cliproxyPluginShutdown
+func cliproxyPluginShutdown() {}
 
 // ============================================================================
 // RPC handlers
 // ============================================================================
 
-func handleRegister(req []byte) []byte {
-	var regReq struct {
-		ConfigYAML    []byte `json:"config_yaml"`
-		SchemaVersion uint32 `json:"schema_version"`
+func handleMethod(method string, request []byte) ([]byte, error) {
+	switch method {
+	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		return handleRegister(request)
+	case pluginabi.MethodRequestInterceptBefore:
+		return handleInterceptBefore(request)
+	case pluginabi.MethodRequestInterceptAfter:
+		return handleInterceptAfter(request)
+	default:
+		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
-	if err := json.Unmarshal(req, &regReq); err != nil {
-		return marshalError("invalid_request", err.Error())
-	}
+}
 
-	// Parse config from YAML/JSON
-	if len(regReq.ConfigYAML) > 0 {
-		var cfg PluginConfig
-		if err := json.Unmarshal(regReq.ConfigYAML, &cfg); err != nil {
-			return marshalError("invalid_config", fmt.Sprintf("parse config: %v", err))
+func handleRegister(request []byte) ([]byte, error) {
+	// Parse config from request
+	var lifecycleReq struct {
+		ConfigYAML []byte `json:"config_yaml"`
+	}
+	if len(request) > 0 {
+		if err := json.Unmarshal(request, &lifecycleReq); err != nil {
+			return errorEnvelope("config_error", fmt.Sprintf("failed to parse request: %v", err)), nil
 		}
-		configMu.Lock()
-		config = cfg
-		configMu.Unlock()
+		if len(lifecycleReq.ConfigYAML) > 0 {
+			var cfg PluginConfig
+			if err := json.Unmarshal(lifecycleReq.ConfigYAML, &cfg); err != nil {
+				return errorEnvelope("config_error", fmt.Sprintf("failed to parse config_yaml JSON: %v (raw: %s)", err, string(lifecycleReq.ConfigYAML))), nil
+			}
+			config = cfg
+		}
 	}
 
-	resp := struct {
-		SchemaVersion uint32         `json:"schema_version"`
-		Metadata      map[string]any `json:"metadata"`
-		Capabilities  map[string]any `json:"capabilities"`
-	}{
-		SchemaVersion: 6,
-		Metadata: map[string]any{
-			"name":               "key-model-restriction",
-			"version":            "1.0.0",
-			"author":             "cliproxy-plugin",
-			"github_repository":  "https://github.com/router-for-me/cliproxy-key-model-restriction",
-		},
-		Capabilities: map[string]any{
-			"request_interceptor": true,
-		},
+	// Return registration with request_interceptor capability
+	meta := pluginapi.Metadata{
+		Name:             "key-model-restriction",
+		Version:          "1.0.0",
+		Author:           "cliproxy-plugin",
+		GitHubRepository: "https://github.com/router-for-me/cliproxy-key-model-restriction",
 	}
-	return marshalResult(resp)
+	return okEnvelope(pluginapi.Plugin{
+		Metadata:      meta,
+		SchemaVersion: pluginabi.SchemaVersion,
+		Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: pluginapi.RequestInterceptor(nil),
+		},
+	})
 }
 
-func handleInterceptBeforeAuth(req []byte) []byte {
+func handleInterceptBefore(request []byte) ([]byte, error) {
 	// No-op: we only intercept after auth to know the caller scope
-	return marshalResult(map[string]any{})
+	return okEnvelope(pluginapi.RequestInterceptResponse{})
 }
 
-func handleInterceptAfterAuth(req []byte) []byte {
-	var interceptReq struct {
-		RequestID      string         `json:"request_id"`
-		TraceID        string         `json:"trace_id"`
-		SourceFormat   string         `json:"source_format"`
-		ToFormat       string         `json:"to_format"`
-		Model          string         `json:"model"`
-		RequestedModel string         `json:"requested_model"`
-		Stream         bool           `json:"stream"`
-		Headers        http.Header    `json:"headers"`
-		Body           []byte         `json:"body"`
-		Metadata       map[string]any `json:"metadata"`
-	}
-	if err := json.Unmarshal(req, &interceptReq); err != nil {
-		return marshalError("invalid_request", err.Error())
+func handleInterceptAfter(request []byte) ([]byte, error) {
+	var req pluginapi.RequestInterceptRequest
+	if len(request) > 0 {
+		if err := json.Unmarshal(request, &req); err != nil {
+			return errorEnvelope("invalid_request", err.Error()), nil
+		}
 	}
 
-	// Get caller_scope from metadata (set by the host from userApiKey)
-	rawScope, _ := interceptReq.Metadata["caller_scope"].(string)
+	// Get caller_scope from metadata
+	rawScope, _ := req.Metadata["caller_scope"].(string)
 	if rawScope == "" {
-		// No caller scope means no downstream API key auth; let it pass
-		return marshalResult(map[string]any{})
+		// No caller scope, pass through
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 
-	// Build scope index and look up this key's config
-	configMu.RLock()
+	// Build scope index and look up config
 	index := buildScopeIndex(config)
 	kc, found := index[rawScope]
-	configMu.RUnlock()
-
 	if !found {
-		// This key is not managed by this plugin; let it pass
-		return marshalResult(map[string]any{})
+		// Key not managed by this plugin, pass through
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 
-	// Determine the model being requested
-	model := interceptReq.Model
+	// Determine the model
+	model := req.Model
 	if model == "" {
-		model = interceptReq.RequestedModel
+		model = req.RequestedModel
 	}
 
-	// Check if the model is allowed
+	// Check if model is allowed
 	if !isModelAllowed(kc, model) {
-		body := fmt.Sprintf(
-			`{"error":{"type":"forbidden","message":"API key is not allowed to use model: %s"}}`,
-			model,
-		)
-		return marshalResult(map[string]any{
-			"terminate":  true,
-			"status_code": http.StatusForbidden,
-			"response_body": []byte(body),
+		body := []byte(`{"error":{"type":"forbidden","message":"API key is not allowed to use model: ` + model + `"}}`)
+		return okEnvelope(pluginapi.RequestInterceptResponse{
+			Terminate:    true,
+			StatusCode:   http.StatusForbidden,
+			ResponseBody: body,
 		})
 	}
 
-	// Allowed; let it pass
-	return marshalResult(map[string]any{})
+	return okEnvelope(pluginapi.RequestInterceptResponse{})
 }
 
 // ============================================================================
 // Core logic
 // ============================================================================
 
-// hashKey produces the same hash as the host's CallerScope function.
 func hashKey(key string) string {
 	sum := sha256.Sum256([]byte("cli-proxy-api:caller-scope:v1\x00" + key))
 	return hex.EncodeToString(sum[:])
 }
 
-// buildScopeIndex builds a map from hashed scope to key config.
 func buildScopeIndex(cfg PluginConfig) map[string]KeyModelConfig {
 	index := make(map[string]KeyModelConfig, len(cfg.Keys))
 	for rawKey, kc := range cfg.Keys {
@@ -265,9 +239,7 @@ func buildScopeIndex(cfg PluginConfig) map[string]KeyModelConfig {
 	return index
 }
 
-// isModelAllowed reports whether the given model is allowed for this key config.
 func isModelAllowed(kc KeyModelConfig, model string) bool {
-	// No allowed_models configured = no restriction
 	if len(kc.AllowedModels) == 0 {
 		return true
 	}
@@ -283,34 +255,33 @@ func isModelAllowed(kc KeyModelConfig, model string) bool {
 // Helpers
 // ============================================================================
 
-func marshalResult(v any) []byte {
-	env := map[string]any{"ok": true}
+func okEnvelope(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return marshalError("marshal_error", err.Error())
+		return nil, err
 	}
-	env["result"] = json.RawMessage(raw)
-	out, _ := json.Marshal(env)
-	return out
+	env := map[string]any{"ok": true, "result": json.RawMessage(raw)}
+	return json.Marshal(env)
 }
 
-func marshalError(code, message string) []byte {
-	env := map[string]any{
-		"ok": false,
-		"error": map[string]any{
-			"code":    code,
-			"message": message,
-		},
+func errorEnvelope(code, message string) []byte {
+	raw, _ := json.Marshal(map[string]any{
+		"ok":    false,
+		"error": map[string]string{"code": code, "message": message},
+	})
+	return raw
+}
+
+func writeResponse(response *C.cliproxy_buffer, raw []byte) {
+	if response == nil || len(raw) == 0 {
+		return
 	}
-	out, _ := json.Marshal(env)
-	return out
+	ptr := C.CBytes(raw)
+	if ptr == nil {
+		return
+	}
+	response.ptr = ptr
+	response.len = C.size_t(len(raw))
 }
 
-// ============================================================================
-// Main (required for plugin build mode, but never called)
-// ============================================================================
-
-func main() {
-	// This is never executed in plugin mode.
-	// The host loads the .so and calls cliproxy_plugin_init directly.
-}
+func main() {}
