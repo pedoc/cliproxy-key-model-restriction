@@ -432,6 +432,9 @@ curl -sS -w "\nHTTP %{http_code}\n" \
   -d '{"model":"<MODEL>","messages":[{"role":"user","content":"hi"}]}' \
   http://192.168.110.201:8317/v1/chat/completions
 
+# 回滚：停止服务、恢复带时间戳的备份、再启动服务
+ssh dev01@192.168.110.201 'systemctl --user stop cliproxyapi; cp -p /home/dev01/cliproxyapi/plugin-backups/key-model-restriction-c.so.<timestamp> /home/dev01/cliproxyapi/plugins/key-model-restriction-c.so; systemctl --user start cliproxyapi'
+
 # 反查某个 JSON 字段名在宿主二进制里有没有 tag
 strings /home/dev01/cliproxyapi/cli-proxy-api | grep -o '<field>' | wc -l
 ```
