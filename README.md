@@ -54,6 +54,20 @@ plugins:
         }
 ```
 
+> **Note:** the key under `configs:` must match the plugin's **file name** (without the `.so`
+> suffix), not the display name in the plugin metadata. Since `build.sh` produces
+> `key-model-restriction-c.so`, the config key is `key-model-restriction-c`. If you rename the
+> file when deploying (e.g. `key_model_restriction.so`), rename the config key to match.
+
+| Config state | Effect |
+|---|---|
+| key absent from `keys` | no restriction |
+| key present, `allowed_models: []` | no restriction |
+| key present, `allowed_models: ["gpt-4o"]` | only `gpt-4o` allowed |
+
+Matching is case-insensitive. A request is allowed if **either** the requested model name or the
+resolved upstream model name is in the allow-list.
+
 ## How It Works
 
 1. The host's `config-api-key` provider validates the API key.
@@ -69,6 +83,8 @@ cliproxy-key-model-restriction/
 │   └── src/
 │       └── plugin.c
 ├── build.sh
+├── config.example.json
+├── dev.md
 └── README.md
 ```
 
