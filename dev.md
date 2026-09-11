@@ -143,7 +143,7 @@ plugin->shutdown    = plugin_shutdown;
 
 > 校验产物别用"数导出符号个数"，用 `scripts/smoke-test.py`——
 > 它完整复刻宿主流程：dlopen → dlsym init → 通过函数表调用 call，
-> 并真实跑通"白名单放行 / 非白名单 403 / 未配置 key 放行"三种场景。
+> 并真实跑通"白名单放行 / 非白名单 403 / 全局规则继承 / Key 例外 / 别名拒绝"等场景。
 
 ---
 
@@ -228,9 +228,93 @@ CPA Management Center 的 `ConfigField` 是 `object`，UI 编辑框实际填写�
 - 只有填写整个插件对象时，才使用 `{ "default": {...}, "keys": {...} }`；
 - 不要把宿主外层的 `plugins.configs`、`enabled`、`priority` 粘贴进单独的 `default` 或 `keys` 编辑框。
 
+### UI 可直接粘贴的 JSON 示例
+
+#### 示例 A：只设置全局拒绝列表
+
+在 `default` object 编辑框中填写：
+
+```json
+{
+  "denied_models": [
+    "hy3",
+    "hy3-201",
+    "hy3-preview-201",
+    "hy3-preview-agent-201",
+    "hy4-preview-201",
+    "LongCat-2.0-201"
+  ]
+}
+```
+
+#### 示例 B：设置全局规则和 Key 例外
+
+如果 UI 分别提供 `default` 和 `keys` 两个 object 编辑框：
+
+`default` 编辑框：
+
+```json
+{
+  "denied_models": [
+    "hy3",
+    "hy3-201",
+    "hy3-preview-201",
+    "hy3-preview-agent-201",
+    "hy4-preview-201",
+    "LongCat-2.0-201"
+  ]
+}
+```
+
+`keys` 编辑框：
+
+```json
+{
+  "sk-example-exempt-key": {
+    "unrestricted": true
+  },
+  "sk-example-limited-key": {
+    "allowed_models": [
+      "gpt-5.6-luna",
+      "gpt-5.5"
+    ]
+  }
+}
+```
+
+#### 示例 C：UI 只有一个完整对象编辑框
+
+```json
+{
+  "default": {
+    "denied_models": [
+      "hy3",
+      "hy3-201",
+      "hy3-preview-201",
+      "hy3-preview-agent-201",
+      "hy4-preview-201",
+      "LongCat-2.0-201"
+    ]
+  },
+  "keys": {
+    "sk-example-exempt-key": {
+      "unrestricted": true
+    },
+    "sk-example-limited-key": {
+      "allowed_models": [
+        "gpt-5.6-luna",
+        "gpt-5.5"
+      ]
+    }
+  }
+}
+```
+
+这里的 `sk-example-*` 只是占位符，实际使用时替换成真实 API Key。不要把 `plugins`、`configs`、插件 ID、`enabled` 或 `priority` 包进 `default`/`keys` object；这些属于宿主配置层，不属于 object 编辑器的值。
+
 ### 规则优先级
 
-1. Key 有 `unrestricted: true` → 该 Key 全部放行；
+1. Key 有 `unrestricted: true` → 该 Key 全部放行；当前实现中它优先于该 Key 自己的模型列表；
 2. Key 有自己的 `allowed_models` 或 `denied_models` → 完整覆盖 `default`，不与全局列表合并；
 3. Key 未配置专属规则 → 继承 `default`；
 4. `default` 缺失或没有有效限制 → 保持旧行为，默认放行；
@@ -294,6 +378,8 @@ allowed_models:
 - 把 HTTP 400 直接等同于“插件放行”：400 可能来自上游模型解析失败；必须结合插件日志确认是否出现 `blocked request`。
 - 把“请求通过插件”误认为“请求最终成功”：插件放行后仍可能被上游拒绝，放行证据应看插件日志，最终结果另看 HTTP 响应。
 - 把真实 API Key 写进测试脚本、命令历史或仓库：本地隔离测试必须使用占位 Key；线上测试只在远程进程内使用，并输出掩码值。
+- 在 `fish` 中直接执行 Bash 专用的复杂命令：可能出现命令替换或 `$` 转义错误；需要明确使用 `bash -c`，或改用远程 shell 原生循环。
+- 用会主动重启服务的 SSH 命令判断上传是否成功：`systemctl --user restart` 可能导致 SSH 在重启时断开；必须重新连接检查版本、端口、进程和日志。
 
 ### 隔离测试脚本模板
 ```python
@@ -401,7 +487,8 @@ CPA 默认日志格式会显示消息文本中的 `api_key_masked=... key_finger
 2. **改代码前必须已有根因。** 没有根因就先加可观测性（日志/隔离测试），不要盲改。
 3. **改动要小而准。** 定位到一行就改一行，别顺手重构。
 4. **每次修复都要回归验证**：允许的模型、被拦截的模型、未配置的 key 三种场景都要过。
-5. **交付要说清楚"证据"**：原始返回值、命令、结果，而不是"应该没问题"。
+5. **线上操作要可回滚**：替换前备份 `.so`，记录配置哈希；重启后重新 SSH 检查，不把断连误判成失败。
+6. **交付要说清楚"证据"**：原始返回值、命令、结果，而不是"应该没问题"。
 
 ---
 
@@ -491,7 +578,7 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 ## 12. 上线前 checklist
 
 - [ ] `gcc -Wall -Wextra -Werror` 编译无 warning
-- [ ] 本地 `ctypes` 隔离测试通过（使用占位 Key，不使用线上真实 Key）
+- [ ] 本地 `ctypes` 隔离测试通过（当前覆盖 13 个场景，使用占位 Key，不使用线上真实 Key）
 - [ ] 配置矩阵覆盖：普通允许、全局拒绝、Key 白名单覆盖、`unrestricted: true`、旧 `allowed_models: []`
 - [ ] 别名矩阵覆盖：`Model` 命中拒绝、`RequestedModel` 命中拒绝、两者不同；拒绝列表任一命中即拒绝
 - [ ] `codex-auto-review` 等特殊命名模型按精确配置验证，不按业务分类猜测
@@ -500,4 +587,5 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 - [ ] 远程更新前备份 `.so`，记录插件与 `config.yaml` 哈希；更新后确认插件版本、PID、8317 端口和配置哈希
 - [ ] 发布版：6 个平台 zip 齐全、`checksums.txt` 行数 = zip 个数、zip 根目录只有 `<id>.<ext>`
 - [ ] 若走商店安装：确认 `plugins.configs` 的键 = 插件 ID（不是 `.so` 旧文件名）
+- [ ] 发布后确认 Release 真实存在且资产完整，不只看 workflow 已触发
 - [ ] 改动已 commit，并写清"根因 + 验证方式"
