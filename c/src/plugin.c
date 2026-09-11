@@ -12,7 +12,7 @@
 #endif
 
 #define ABI_VERSION 1
-#define PLUGIN_VERSION "1.2.1"
+#define PLUGIN_VERSION "1.3.1"
 
 typedef struct {
     void* ptr;
@@ -249,6 +249,7 @@ static char* extract_json_string(const char* json, const char* key) {
 #define MAX_MODELS 64
 
 typedef struct {
+    char* masked_api_key;
     char scope[65];  // hashed key
     char* models[MAX_MODELS];
     int model_count;
@@ -259,6 +260,7 @@ static int g_key_count = 0;
 
 static void clear_config(void) {
     for (int i = 0; i < g_key_count; i++) {
+        free(g_keys[i].masked_api_key);
         for (int j = 0; j < g_keys[i].model_count; j++)
             free(g_keys[i].models[j]);
     }
@@ -310,12 +312,35 @@ static char* yaml_scalar_copy(const char* value, size_t len) {
     return out;
 }
 
+static char* mask_api_key(const char* api_key) {
+    if (!api_key) return strdup("unknown");
+    size_t len = strlen(api_key);
+    if (len <= 12) return strdup("***");
+    size_t prefix_len = 8;
+    size_t suffix_len = 4;
+    size_t out_len = prefix_len + 3 + suffix_len;
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) return NULL;
+    memcpy(out, api_key, prefix_len);
+    memcpy(out + prefix_len, "...", 3);
+    if (suffix_len > 0) memcpy(out + prefix_len + 3, api_key + len - suffix_len, suffix_len);
+    out[out_len] = '\0';
+    return out;
+}
+
 static KeyConfig* add_key_config(const char* raw_key) {
     if (!raw_key || !*raw_key || g_key_count >= MAX_KEYS) return NULL;
     KeyConfig* kc = &g_keys[g_key_count++];
     memset(kc, 0, sizeof(*kc));
+    kc->masked_api_key = mask_api_key(raw_key);
+    if (!kc->masked_api_key) {
+        g_key_count--;
+        return NULL;
+    }
     char* scope = hash_key(raw_key);
     if (!scope) {
+        free(kc->masked_api_key);
+        kc->masked_api_key = NULL;
         g_key_count--;
         return NULL;
     }
@@ -511,16 +536,19 @@ static void write_response(cliproxy_buffer* resp, const char* text) {
 }
 
 static void call_host_log(const char* level, const char* message,
-                          const char* caller_scope, const char* model,
-                          const char* requested_model, const char* decision,
-                          const char* reason, const char* allowed_models,
-                          const char* request_id, const char* trace_id) {
+                          const char* caller_scope, const char* api_key_masked,
+                          const char* model, const char* requested_model,
+                          const char* decision, const char* reason,
+                          const char* allowed_models, const char* request_id,
+                          const char* trace_id) {
     if (!stored_host || !stored_host->call || !level || !message) return;
     char key_id[13];
     key_fingerprint(caller_scope, key_id);
+    const char* visible_key = api_key_masked && *api_key_masked ? api_key_masked : "unknown";
     char* level_esc = json_escape(level);
     char* message_esc = json_escape(message);
     char* key_id_esc = json_escape(key_id);
+    char* api_key_masked_esc = json_escape(visible_key);
     char* model_esc = json_escape(model ? model : "");
     char* requested_esc = json_escape(requested_model ? requested_model : "");
     char* decision_esc = json_escape(decision ? decision : "");
@@ -528,27 +556,28 @@ static void call_host_log(const char* level, const char* message,
     char* allowed_esc = json_escape(allowed_models ? allowed_models : "");
     char* request_id_esc = json_escape(request_id ? request_id : "");
     char* trace_id_esc = json_escape(trace_id ? trace_id : "");
-    if (!level_esc || !message_esc || !key_id_esc || !model_esc ||
+    if (!level_esc || !message_esc || !key_id_esc || !api_key_masked_esc || !model_esc ||
         !requested_esc || !decision_esc || !reason_esc || !allowed_esc ||
         !request_id_esc || !trace_id_esc) {
-        free(level_esc); free(message_esc); free(key_id_esc);
+        free(level_esc); free(message_esc); free(key_id_esc); free(api_key_masked_esc);
         free(model_esc); free(requested_esc); free(decision_esc); free(reason_esc);
         free(allowed_esc); free(request_id_esc); free(trace_id_esc);
         return;
     }
 
-    char* visible_message = format_string("%s key_fingerprint=%s", message, key_id);
+    char* visible_message = format_string("%s api_key_masked=%s key_fingerprint=%s",
+                                          message, visible_key, key_id);
     char* visible_message_esc = json_escape(visible_message ? visible_message : message);
     char* payload = format_string(
         "{\"level\":\"%s\",\"message\":\"%s\",\"fields\":{"
         "\"plugin\":\"key-model-restriction\","
-        "\"key_fingerprint\":\"%s\",\"model\":\"%s\","
+        "\"key_fingerprint\":\"%s\",\"api_key_masked\":\"%s\",\"model\":\"%s\","
         "\"requested_model\":\"%s\",\"decision\":\"%s\","
         "\"reason\":\"%s\",\"allowed_models\":\"%s\","
         "\"request_id\":\"%s\",\"trace_id\":\"%s\"}}",
         level_esc, visible_message_esc ? visible_message_esc : message_esc,
-        key_id_esc, model_esc, requested_esc, decision_esc, reason_esc,
-        allowed_esc, request_id_esc, trace_id_esc);
+        key_id_esc, api_key_masked_esc, model_esc, requested_esc, decision_esc,
+        reason_esc, allowed_esc, request_id_esc, trace_id_esc);
     if (payload) {
         cliproxy_buffer response = {0};
         const uint8_t* request = (const uint8_t*)payload;
@@ -559,7 +588,7 @@ static void call_host_log(const char* level, const char* message,
     }
     free(payload);
     free(visible_message); free(visible_message_esc);
-    free(level_esc); free(message_esc); free(key_id_esc);
+    free(level_esc); free(message_esc); free(key_id_esc); free(api_key_masked_esc);
     free(model_esc); free(requested_esc); free(decision_esc); free(reason_esc);
     free(allowed_esc); free(request_id_esc); free(trace_id_esc);
 }
@@ -651,7 +680,7 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             caller_scope = extract_json_string(metadata, "caller_scope");
         }
         if (!caller_scope || strlen(caller_scope) == 0) {
-            call_host_log("info", "key-model-restriction decision", NULL, model,
+            call_host_log("info", "key-model-restriction decision", NULL, NULL, model,
                           requested_model, "allow", "missing_caller_scope", "", request_id, trace_id);
             free(request_id); free(trace_id); free(model); free(requested_model);
             free(caller_scope); free(metadata); free(json);
@@ -660,7 +689,7 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
         }
         const KeyConfig* kc = find_key_config(caller_scope);
         if (!kc) {
-            call_host_log("info", "key-model-restriction decision", caller_scope, model,
+            call_host_log("info", "key-model-restriction decision", caller_scope, NULL, model,
                           requested_model, "allow", "key_not_configured", "", request_id, trace_id);
             free(request_id); free(trace_id); free(model); free(requested_model);
             free(caller_scope); free(metadata); free(json);
@@ -701,7 +730,7 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
                 "{\"ok\":true,\"result\":{\"Terminate\":true,\"StatusCode\":403,\"ResponseBody\":\"%s\"}}",
                 body_b64 ? body_b64 : "");
             call_host_log("warn", "key-model-restriction blocked request", caller_scope,
-                          model, requested_model, "block", "model_not_allowed",
+                          kc->masked_api_key, model, requested_model, "block", "model_not_allowed",
                           allowed_models, request_id, trace_id);
             write_response(response, result);
             free(model_esc); free(allowed_esc); free(body); free(body_b64); free(result);
@@ -710,7 +739,7 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             return 0;
         }
         call_host_log("info", "key-model-restriction allowed request", caller_scope,
-                      model, requested_model, "allow", "model_allowed",
+                      kc->masked_api_key, model, requested_model, "allow", "model_allowed",
                       allowed_models, request_id, trace_id);
         free(allowed_models); free(request_id); free(trace_id); free(model); free(requested_model);
         free(caller_scope); free(metadata); free(json);

@@ -155,15 +155,17 @@ def main(argv: list[str]) -> int:
 
     # The host base64-encodes the complete plugin config YAML. This is the
     # direct object shape produced by the CPA Management Center object editor.
-    ui_config = b"""enabled: true
+    configured_key = "sk-good-1234567890abcdef"
+    masked_key = "sk-good-...cdef"
+    ui_config = f"""enabled: true
 priority: 100
 keys:
-  sk-good:
+  {configured_key}:
     allowed_models:
       - gpt-6-astra
   sk-open:
     allowed_models: []
-"""
+""".encode()
     registration = call("plugin.register", {"config_yaml": base64.b64encode(ui_config).decode()})
     if not registration.get("ok"):
         print(f"FAIL: plugin.register rejected the config: {registration}", file=sys.stderr)
@@ -176,7 +178,7 @@ keys:
 
     allowed = "gpt-6-astra"
     blocked = "hy3-201"
-    scope = caller_scope("sk-good")
+    scope = caller_scope(configured_key)
 
     failures = 0
     cases = [
@@ -202,13 +204,23 @@ keys:
         print(f"FAIL: expected {len(cases)} host.log calls, got {len(decision_logs)}", file=sys.stderr)
         failures += 1
     else:
-        for entry in decision_logs:
+        for index, entry in enumerate(decision_logs):
             fields = entry.get("fields", {})
             if not fields.get("decision") or not fields.get("reason"):
                 print(f"FAIL: incomplete decision log: {entry}", file=sys.stderr)
                 failures += 1
             if "key_fingerprint=" not in entry.get("message", ""):
                 print(f"FAIL: key fingerprint is not visible in log message: {entry}", file=sys.stderr)
+                failures += 1
+            if "api_key_masked=" not in entry.get("message", ""):
+                print(f"FAIL: masked API key is not visible in log message: {entry}", file=sys.stderr)
+                failures += 1
+            expected_masked = (masked_key, masked_key, "***", "unknown")[index]
+            if fields.get("api_key_masked") != expected_masked:
+                print(f"FAIL: masked API key = {fields.get('api_key_masked')!r}, want {expected_masked!r}", file=sys.stderr)
+                failures += 1
+            if configured_key in entry.get("message", ""):
+                print("FAIL: full configured API key leaked into log message", file=sys.stderr)
                 failures += 1
         print(f"host.log decision records: {len(decision_logs)}")
     if any(entry.get("fields", {}).get("api_key") for entry in decision_logs):

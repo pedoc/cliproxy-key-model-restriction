@@ -238,6 +238,7 @@ C ABI 宿主提供 `host.log` 回调，插件通过 `cliproxy_host_api.call` 调
   "fields": {
     "plugin": "key-model-restriction",
     "key_fingerprint": "<caller_scope 前 12 位>",
+    "api_key_masked": "sk-example...1234",
     "model": "hy3-201",
     "requested_model": "hy3-201",
     "decision": "block",
@@ -255,8 +256,8 @@ C ABI 宿主提供 `host.log` 回调，插件通过 `cliproxy_host_api.call` 调
 journalctl --user -u cliproxyapi --no-pager | grep key-model-restriction
 ```
 
-CPA 默认日志格式会显示消息文本中的 `key_fingerprint=<12 位指纹>`；自定义 `fields` 可能不会全部展示。
-当前版本只记录 `caller_scope` 的前 12 位作为 `key_fingerprint`，不记录原始 API Key；不要为了查询日志而把原始 Key 放进命令行或 shell 历史。
+CPA 默认日志格式会显示消息文本中的 `api_key_masked=... key_fingerprint=<12 位指纹>`；自定义 `fields` 可能不会全部展示。
+当前版本记录配置 API Key 的前 8 位和后 4 位作为 `api_key_masked`，不会记录完整 API Key。
 
 ---
 

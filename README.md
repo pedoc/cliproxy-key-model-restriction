@@ -163,7 +163,8 @@ journalctl --user -u cliproxyapi --no-pager | grep key-model-restriction
 
 Each record includes:
 
-- the visible message suffix `key_fingerprint=<12-character fingerprint>` (CPA's default formatter displays the message even when it omits custom fields)
+- the visible message suffix `api_key_masked=sk-example...1234 key_fingerprint=<12-character fingerprint>` (CPA's default formatter displays the message even when it omits custom fields)
+- `api_key_masked`: the configured API Key with only its first 8 and last 4 characters visible
 - `decision`: `allow` or `block`
 - `reason`: `model_allowed`, `model_not_allowed`, `key_not_configured`, or `missing_caller_scope`
 - `model` and `requested_model`
@@ -171,10 +172,8 @@ Each record includes:
 - `request_id` and `trace_id` when supplied by CPA
 - `key_fingerprint`: the first 12 characters of the host-generated `caller_scope`
 
-The plugin deliberately does **not** write the raw API Key to logs. This keeps the log useful for
-correlation without turning `journalctl` into a credential store. If you need to correlate a
-fingerprint with a configured key, calculate the same caller scope locally; do not put the raw key
-in a log query or shell history.
+The plugin writes only a masked form of the configured API Key to logs (first 8 and last 4
+characters). It does not write the complete API Key.
 
 ## How It Works
 
