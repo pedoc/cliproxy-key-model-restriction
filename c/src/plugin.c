@@ -12,7 +12,7 @@
 #endif
 
 #define ABI_VERSION 1
-#define PLUGIN_VERSION "1.2.0"
+#define PLUGIN_VERSION "1.2.1"
 
 typedef struct {
     void* ptr;
@@ -537,6 +537,8 @@ static void call_host_log(const char* level, const char* message,
         return;
     }
 
+    char* visible_message = format_string("%s key_fingerprint=%s", message, key_id);
+    char* visible_message_esc = json_escape(visible_message ? visible_message : message);
     char* payload = format_string(
         "{\"level\":\"%s\",\"message\":\"%s\",\"fields\":{"
         "\"plugin\":\"key-model-restriction\","
@@ -544,8 +546,9 @@ static void call_host_log(const char* level, const char* message,
         "\"requested_model\":\"%s\",\"decision\":\"%s\","
         "\"reason\":\"%s\",\"allowed_models\":\"%s\","
         "\"request_id\":\"%s\",\"trace_id\":\"%s\"}}",
-        level_esc, message_esc, key_id_esc, model_esc, requested_esc,
-        decision_esc, reason_esc, allowed_esc, request_id_esc, trace_id_esc);
+        level_esc, visible_message_esc ? visible_message_esc : message_esc,
+        key_id_esc, model_esc, requested_esc, decision_esc, reason_esc,
+        allowed_esc, request_id_esc, trace_id_esc);
     if (payload) {
         cliproxy_buffer response = {0};
         const uint8_t* request = (const uint8_t*)payload;
@@ -555,6 +558,7 @@ static void call_host_log(const char* level, const char* message,
         (void)rc;
     }
     free(payload);
+    free(visible_message); free(visible_message_esc);
     free(level_esc); free(message_esc); free(key_id_esc);
     free(model_esc); free(requested_esc); free(decision_esc); free(reason_esc);
     free(allowed_esc); free(request_id_esc); free(trace_id_esc);

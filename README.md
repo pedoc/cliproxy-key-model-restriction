@@ -163,6 +163,7 @@ journalctl --user -u cliproxyapi --no-pager | grep key-model-restriction
 
 Each record includes:
 
+- the visible message suffix `key_fingerprint=<12-character fingerprint>` (CPA's default formatter displays the message even when it omits custom fields)
 - `decision`: `allow` or `block`
 - `reason`: `model_allowed`, `model_not_allowed`, `key_not_configured`, or `missing_caller_scope`
 - `model` and `requested_model`

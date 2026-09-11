@@ -255,6 +255,7 @@ C ABI 宿主提供 `host.log` 回调，插件通过 `cliproxy_host_api.call` 调
 journalctl --user -u cliproxyapi --no-pager | grep key-model-restriction
 ```
 
+CPA 默认日志格式会显示消息文本中的 `key_fingerprint=<12 位指纹>`；自定义 `fields` 可能不会全部展示。
 当前版本只记录 `caller_scope` 的前 12 位作为 `key_fingerprint`，不记录原始 API Key；不要为了查询日志而把原始 Key 放进命令行或 shell 历史。
 
 ---

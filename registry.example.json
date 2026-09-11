@@ -6,7 +6,7 @@
       "name": "Key Model Restriction",
       "description": "Restricts which models each API key may use. Keys that are not configured, or that declare an empty allowed_models list, stay unrestricted.",
       "author": "pedoc",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "repository": "https://github.com/pedoc/cliproxy-key-model-restriction",
       "homepage": "https://github.com/pedoc/cliproxy-key-model-restriction",
       "license": "MIT",

@@ -207,6 +207,9 @@ keys:
             if not fields.get("decision") or not fields.get("reason"):
                 print(f"FAIL: incomplete decision log: {entry}", file=sys.stderr)
                 failures += 1
+            if "key_fingerprint=" not in entry.get("message", ""):
+                print(f"FAIL: key fingerprint is not visible in log message: {entry}", file=sys.stderr)
+                failures += 1
         print(f"host.log decision records: {len(decision_logs)}")
     if any(entry.get("fields", {}).get("api_key") for entry in decision_logs):
         print("FAIL: host.log contains forbidden api_key field", file=sys.stderr)
