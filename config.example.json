@@ -1,6 +1,9 @@
 {
   "enabled": true,
   "priority": 100,
+  "default": {
+    "denied_models": ["hy3-201", "gpt-4-turbo"]
+  },
   "keys": {
     "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
       "allowed_models": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet"]

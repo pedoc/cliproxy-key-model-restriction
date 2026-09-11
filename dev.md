@@ -239,6 +239,7 @@ C ABI 宿主提供 `host.log` 回调，插件通过 `cliproxy_host_api.call` 调
     "plugin": "key-model-restriction",
     "key_fingerprint": "<caller_scope 前 12 位>",
     "api_key_masked": "sk-example...1234",
+    "rule_source": "default",
     "model": "hy3-201",
     "requested_model": "hy3-201",
     "decision": "block",
@@ -258,6 +259,8 @@ journalctl --user -u cliproxyapi --no-pager | grep key-model-restriction
 
 CPA 默认日志格式会显示消息文本中的 `api_key_masked=... key_fingerprint=<12 位指纹>`；自定义 `fields` 可能不会全部展示。
 当前版本记录配置 API Key 的前 8 位和后 4 位作为 `api_key_masked`，不会记录完整 API Key。
+`rule_source` 为 `default` 或 `key`，用于确认本次请求采用了全局规则还是 Key 专属覆盖。
+全局规则中 `denied_models` 优先于 `allowed_models`；Key 一旦配置自己的规则，就不再和全局列表合并。
 
 ---
 
@@ -345,7 +348,8 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 
 - [ ] `gcc` 编译无 warning
 - [ ] 本地 ctypes 隔离测试通过（含边界：空 `allowed_models`、别名、不存在的 scoped key）
-- [ ] 远程三种场景回归：允许 → 非 403；不允许 → 403 **且 body 有内容**；未配置 key → 放行
+- [ ] 远程三种场景回归：允许 → 非 403；不允许 → 403 **且 body 有内容**；无全局规则时未配置 key → 放行
+- [ ] 全局规则回归：未配置 key 继承 `default`；Key 专属规则覆盖 `default`；`unrestricted: true` 和旧 `allowed_models: []` 绕过全局规则；`denied_models` 优先；日志包含 `rule_source`
 - [ ] 403 body 里含 `code` 字段，便于客户端识别
 - [ ] `scripts/smoke-test.py` 通过（等价于宿主 dlopen + 函数表调用）
 - [ ] 发布版：6 个平台 zip 齐全、`checksums.txt` 行数 = zip 个数、zip 根目录只有 `<id>.<ext>`

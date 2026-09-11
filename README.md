@@ -4,10 +4,16 @@ CLIProxyAPI plugin that restricts which models each API key can use.
 
 ## Behavior
 
-- If an API key is **not** in the plugin config → no restriction (all models allowed).
-- If an API key is in the config with `allowed_models: []` → no restriction.
-- If an API key is in the config with `allowed_models: ["gpt-4o", ...]` → only those models are allowed.
-- Requests to unauthorized models receive HTTP 403.
+The plugin has one global default rule and optional per-key overrides:
+
+1. A key with `unrestricted: true` is always allowed.
+2. A key with its own `allowed_models` or `denied_models` uses that rule instead of the global default.
+3. A key not listed under `keys` inherits `default`.
+4. If both lists match, `denied_models` wins.
+5. No `default` rule means unrestricted, preserving the old behavior.
+6. Legacy `allowed_models: []` remains an explicit unrestricted rule.
+
+Unauthorized models receive HTTP 403.
 
 ## Build
 
@@ -93,7 +99,7 @@ plugins:
 
 ## Configuration
 
-In your `config.yaml`, the plugin configuration uses the direct `keys` object:
+In your `config.yaml`, the plugin configuration uses a global `default` rule plus the direct `keys` object. Both are exposed as separate object editors in the CPA Management Center:
 
 ```yaml
 plugins:
@@ -103,6 +109,10 @@ plugins:
     key-model-restriction-c:
       enabled: true
       priority: 100
+      default:
+        denied_models:
+          - hy3-201
+          - gpt-4-turbo
       keys:
         sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
           allowed_models:
@@ -110,16 +120,17 @@ plugins:
             - gpt-4o-mini
             - claude-3-5-sonnet
         sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:
-          allowed_models: []
+          unrestricted: true
 ```
 
-The plugin declares `keys` as a CPA `ConfigField` of type `object`. Therefore the official
-Management Center automatically shows an object/JSON editor for it:
+The plugin declares both `default` and `keys` as CPA `ConfigField` values of type `object`. Therefore the official
+Management Center automatically shows separate object/JSON editors for them. Use `default` for the
+common rule and `keys` only for exceptions or explicit per-key policies:
 
 1. Open the CPA Management Center and go to **Plugins**.
 2. Find **key-model-restriction-c** (or the store-installed ID **key-model-restriction**).
 3. Click its configuration button.
-4. Edit the `keys` object as JSON and save.
+4. Edit the `default` object for the global rule and the `keys` object for per-key overrides, then save.
 5. CPA writes the configuration and triggers `plugin.reconfigure`; no service restart is needed.
 
 The UI editor uses JSON for object fields, so this is also valid in the `keys` field:
@@ -145,12 +156,15 @@ The UI editor uses JSON for object fields, so this is also valid in the `keys` f
 
 | Config state | Effect |
 |---|---|
-| key absent from `keys` | no restriction |
-| key present, `allowed_models: []` | no restriction |
-| key present, `allowed_models: ["gpt-4o"]` | only `gpt-4o` allowed |
+| `default.denied_models: ["hy3-201"]`, key absent | `hy3-201` denied for this key |
+| key has `allowed_models: ["gpt-4o"]` | only `gpt-4o` allowed; global rule ignored |
+| key has `unrestricted: true` | all models allowed; global rule ignored |
+| legacy key `allowed_models: []` | all models allowed; global rule ignored |
+| no `default` and key absent | no restriction |
 
 Matching is case-insensitive. A request is allowed if **either** the requested model name or the
-resolved upstream model name is in the allow-list.
+resolved upstream model name passes the effective rule. A denied model always wins over an allowed
+model.
 
 ## Decision Logs
 
@@ -166,7 +180,8 @@ Each record includes:
 - the visible message suffix `api_key_masked=sk-example...1234 key_fingerprint=<12-character fingerprint>` (CPA's default formatter displays the message even when it omits custom fields)
 - `api_key_masked`: the configured API Key with only its first 8 and last 4 characters visible
 - `decision`: `allow` or `block`
-- `reason`: `model_allowed`, `model_not_allowed`, `key_not_configured`, or `missing_caller_scope`
+- `reason`: `model_allowed`, `model_not_allowed`, or `missing_caller_scope`
+- `rule_source`: `default`, `key`, or `none`
 - `model` and `requested_model`
 - `allowed_models`
 - `request_id` and `trace_id` when supplied by CPA
@@ -179,8 +194,8 @@ characters). It does not write the complete API Key.
 
 1. The host's `config-api-key` provider validates the API key.
 2. The host hashes the key into `caller_scope` and puts it in request metadata.
-3. This plugin's `request.intercept_after` hook reads `caller_scope`, looks up the key's allowed models, and terminates the request with 403 if the model is not allowed.
-4. The plugin sends the decision to CPA through `host.log`.
+3. This plugin's `request.intercept_after` hook reads `caller_scope`, resolves the per-key rule or global `default`, and terminates the request with 403 if the model is not allowed.
+4. The plugin sends the decision and `rule_source` (`key`, `default`, or `none`) to CPA through `host.log`.
 
 ## Project Structure
 

@@ -157,13 +157,29 @@ def main(argv: list[str]) -> int:
     # direct object shape produced by the CPA Management Center object editor.
     configured_key = "sk-good-1234567890abcdef"
     masked_key = "sk-good-...cdef"
+    override_key = "sk-override-1234567890"
+    exempt_key = "sk-exempt-1234567890"
+    legacy_key = "sk-legacy-1234567890"
     ui_config = f"""enabled: true
 priority: 100
+default:
+  allowed_models:
+    - gpt-6-astra
+    - global-safe
+  denied_models:
+    - hy3-201
 keys:
   {configured_key}:
     allowed_models:
-      - gpt-6-astra
-  sk-open:
+      - claude-4
+  {override_key}:
+    allowed_models:
+      - claude-4
+    denied_models:
+      - claude-4
+  {exempt_key}:
+    unrestricted: true
+  {legacy_key}:
     allowed_models: []
 """.encode()
     registration = call("plugin.register", {"config_yaml": base64.b64encode(ui_config).decode()})
@@ -171,21 +187,24 @@ keys:
         print(f"FAIL: plugin.register rejected the config: {registration}", file=sys.stderr)
         return 1
     fields = registration.get("result", {}).get("metadata", {}).get("ConfigFields", [])
-    if not any(field.get("Name") == "keys" and field.get("Type") == "object" for field in fields):
-        print(f"FAIL: registration did not advertise keys as an object field: {fields}", file=sys.stderr)
+    advertised = {(field.get("Name"), field.get("Type")) for field in fields}
+    if ("keys", "object") not in advertised or ("default", "object") not in advertised:
+        print(f"FAIL: registration did not advertise default/keys object fields: {fields}", file=sys.stderr)
         return 1
-    print("plugin.register ok: ConfigFields contains keys/object")
+    print("plugin.register ok: ConfigFields contains default/keys objects")
 
     allowed = "gpt-6-astra"
     blocked = "hy3-201"
-    scope = caller_scope(configured_key)
-
     failures = 0
     cases = [
-        (allowed, {"caller_scope": scope}, False, "allowed model must pass"),
-        (blocked, {"caller_scope": scope}, True, "non-allowed model must be terminated"),
-        (blocked, {"caller_scope": caller_scope("sk-open")}, False, "empty allow-list must pass"),
-        (blocked, {"caller_scope": caller_scope("sk-unknown")}, False, "unknown key must pass"),
+        (allowed, {"caller_scope": caller_scope("sk-unknown")}, False, "global allowed model must pass"),
+        (blocked, {"caller_scope": caller_scope("sk-unknown")}, True, "global denied model must terminate"),
+        ("claude-4", {"caller_scope": caller_scope(configured_key)}, False, "key override allowed model must pass"),
+        (allowed, {"caller_scope": caller_scope(configured_key)}, True, "key override must ignore global allowed list"),
+        ("claude-4", {"caller_scope": caller_scope(override_key)}, True, "denied model wins over allowed model"),
+        (blocked, {"caller_scope": caller_scope(exempt_key)}, False, "explicit unrestricted must pass"),
+        (blocked, {"caller_scope": caller_scope(legacy_key)}, False, "legacy empty allow-list must pass"),
+        (blocked, {}, False, "missing caller scope must pass"),
     ]
     for model, metadata, expect_terminate, label in cases:
         response = call(
@@ -215,9 +234,14 @@ keys:
             if "api_key_masked=" not in entry.get("message", ""):
                 print(f"FAIL: masked API key is not visible in log message: {entry}", file=sys.stderr)
                 failures += 1
-            expected_masked = (masked_key, masked_key, "***", "unknown")[index]
+            expected_masked = ("unknown", "unknown", masked_key, masked_key,
+                               "sk-overr...7890", "sk-exemp...7890", "sk-legac...7890", "unknown")[index]
             if fields.get("api_key_masked") != expected_masked:
                 print(f"FAIL: masked API key = {fields.get('api_key_masked')!r}, want {expected_masked!r}", file=sys.stderr)
+                failures += 1
+            expected_source = "none" if index == len(cases) - 1 else ("key" if index >= 2 and index <= 6 else "default")
+            if fields.get("rule_source") != expected_source:
+                print(f"FAIL: rule source = {fields.get('rule_source')!r}, want {expected_source!r}", file=sys.stderr)
                 failures += 1
             if configured_key in entry.get("message", ""):
                 print("FAIL: full configured API key leaked into log message", file=sys.stderr)
