@@ -93,7 +93,7 @@ plugins:
 
 ## Configuration
 
-In your `config.yaml`:
+In your `config.yaml`, the plugin configuration uses the direct `keys` object:
 
 ```yaml
 plugins:
@@ -103,24 +103,45 @@ plugins:
     key-model-restriction-c:
       enabled: true
       priority: 100
-      config_yaml: |
-        {
-          "keys": {
-            "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
-              "allowed_models": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet"]
-            },
-            "sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
-              "allowed_models": []
-            }
-          }
-        }
+      keys:
+        sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+          allowed_models:
+            - gpt-4o
+            - gpt-4o-mini
+            - claude-3-5-sonnet
+        sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:
+          allowed_models: []
+```
+
+The plugin declares `keys` as a CPA `ConfigField` of type `object`. Therefore the official
+Management Center automatically shows an object/JSON editor for it:
+
+1. Open the CPA Management Center and go to **Plugins**.
+2. Find **key-model-restriction-c** (or the store-installed ID **key-model-restriction**).
+3. Click its configuration button.
+4. Edit the `keys` object as JSON and save.
+5. CPA writes the configuration and triggers `plugin.reconfigure`; no service restart is needed.
+
+The UI editor uses JSON for object fields, so this is also valid in the `keys` field:
+
+```json
+{
+  "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+    "allowed_models": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet"]
+  },
+  "sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+    "allowed_models": []
+  }
+}
 ```
 
 > **Note:** the key under `configs:` must match the plugin's **file name** (without the `.so`
 > suffix), not the display name in the plugin metadata. Since `build.sh` produces
-> `key-model-restriction-c.so`, the config key is `key-model-restriction-c`. If you rename the
-> `.so` when deploying, rename the config key to match — otherwise your `config_yaml` is never
-> delivered and the plugin silently applies no restriction.
+> `key-model-restriction-c.so`, the manual-install config key is `key-model-restriction-c`. If
+> you rename the `.so` when deploying, rename the config key to match.
+>
+> A store installation uses the registry ID `key-model-restriction`, so its config key is
+> `key-model-restriction` and its versioned file is `key-model-restriction-v1.1.0.so`.
 
 | Config state | Effect |
 |---|---|

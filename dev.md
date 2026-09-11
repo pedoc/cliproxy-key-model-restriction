@@ -175,7 +175,7 @@ Go 的 `encoding/json` 会把 `[]byte` 编成 base64 字符串，解码时也按
 
 | 字段 | 方向 | 处理 |
 |---|---|---|
-| `config_yaml`（注册请求） | 宿主 → 插件 | 插件收到后要 **base64 解码** 再解析 JSON |
+| `config_yaml`（注册请求外层字段） | 宿主 → 插件 | 插件收到后要 **base64 解码**，再解析 CPA UI 生成的新版 YAML（内容含 `keys`） |
 | `ResponseBody`（拦截响应） | 插件 → 宿主 | 插件要 **base64 编码** |
 | `Body` / `OriginalRequest` 等 | 双向 | 同上 |
 
@@ -221,7 +221,7 @@ class Buf(ctypes.Structure):
 lib = ctypes.CDLL("./key-model-restriction-c.so")
 # ... 定义 HostAPI / PluginAPI 结构体后：
 # lib.cliproxy_plugin_init(byref(host), byref(plugin))
-# plugin.call(b"plugin.register", ...)     # 先注入 config_yaml(base64)
+# plugin.call(b"plugin.register", ...)     # 注入新版 keys YAML（外层字段 base64）
 # plugin.call(b"request.intercept_after", ...)  # 再喂拦截请求，打印原始输出
 ```
 
@@ -300,10 +300,10 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 | 安装方式 | 文件名 | 插件 ID / 配置键 |
 |---|---|---|
 | 手工拷贝 | `key-model-restriction-c.so` | `key-model-restriction-c` |
-| 商店安装 | `key-model-restriction-v1.0.0.so` | `key-model-restriction` |
+| 商店安装 | `key-model-restriction-v1.1.0.so` | `key-model-restriction` |
 
 两条路径的配置键**不一样**。键写错 → 插件加载成功、注册成功，
-但 `config_yaml` 不会下发 → **静默不拦截**，没有任何报错。
+但插件配置不会按预期下发 → **静默不拦截**，没有任何报错。
 
 ---
 

@@ -12,6 +12,7 @@
 #endif
 
 #define ABI_VERSION 1
+#define PLUGIN_VERSION "1.1.0"
 
 typedef struct {
     void* ptr;
@@ -268,12 +269,64 @@ static int model_allowed(const KeyConfig* kc, const char* model) {
 }
 
 // ============================================================================
-// Config parser (simple JSON)
+// Config parser (direct YAML from the CPA UI)
 // ============================================================================
+
+static char* yaml_scalar_copy(const char* value, size_t len) {
+    while (len > 0 && ispace((unsigned char)value[0])) { value++; len--; }
+    while (len > 0 && ispace((unsigned char)value[len - 1])) len--;
+    if (len >= 2 && ((value[0] == '"' && value[len - 1] == '"') ||
+                     (value[0] == '\'' && value[len - 1] == '\''))) {
+        value++;
+        len -= 2;
+    }
+    char* out = (char*)malloc(len + 1);
+    if (!out) return NULL;
+    size_t out_len = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (value[i] == '\\' && i + 1 < len) {
+            i++;
+            if (value[i] == 'n') out[out_len++] = '\n';
+            else if (value[i] == 'r') out[out_len++] = '\r';
+            else if (value[i] == 't') out[out_len++] = '\t';
+            else out[out_len++] = value[i];
+        } else {
+            out[out_len++] = value[i];
+        }
+    }
+    out[out_len] = '\0';
+    return out;
+}
+
+static KeyConfig* add_key_config(const char* raw_key) {
+    if (!raw_key || !*raw_key || g_key_count >= MAX_KEYS) return NULL;
+    KeyConfig* kc = &g_keys[g_key_count++];
+    memset(kc, 0, sizeof(*kc));
+    char* scope = hash_key(raw_key);
+    if (!scope) {
+        g_key_count--;
+        return NULL;
+    }
+    strncpy(kc->scope, scope, 64);
+    kc->scope[64] = '\0';
+    free(scope);
+    return kc;
+}
+
+static void add_model_config(KeyConfig* kc, const char* value, size_t len) {
+    if (!kc || kc->model_count >= MAX_MODELS) return;
+    char* model = yaml_scalar_copy(value, len);
+    if (!model || !*model) {
+        free(model);
+        return;
+    }
+    kc->models[kc->model_count++] = model;
+}
 
 static char* extract_json_object(const char* json, const char* key) {
     if (!json || !key) return NULL;
     char* pattern = (char*)malloc(strlen(key) + 3);
+    if (!pattern) return NULL;
     sprintf(pattern, "\"%s\"", key);
     const char* pos = strstr(json, pattern);
     free(pattern);
@@ -281,7 +334,7 @@ static char* extract_json_object(const char* json, const char* key) {
     pos = strchr(pos, ':');
     if (!pos) return NULL;
     pos++;
-    while (*pos && ispace(*pos)) pos++;
+    while (*pos && ispace((unsigned char)*pos)) pos++;
     if (*pos != '{') return NULL;
     int depth = 1;
     const char* start = pos + 1;
@@ -294,111 +347,127 @@ static char* extract_json_object(const char* json, const char* key) {
     if (depth != 0) return NULL;
     size_t len = (size_t)(pos - start);
     char* out = (char*)malloc(len + 1);
+    if (!out) return NULL;
     memcpy(out, start, len);
     out[len] = '\0';
     return out;
 }
 
-static char* extract_json_array(const char* json, const char* key) {
-    if (!json || !key) return NULL;
-    char* pattern = (char*)malloc(strlen(key) + 3);
-    sprintf(pattern, "\"%s\"", key);
-    const char* pos = strstr(json, pattern);
-    free(pattern);
-    if (!pos) return NULL;
-    pos = strchr(pos, ':');
-    if (!pos) return NULL;
-    pos++;
-    while (*pos && ispace(*pos)) pos++;
-    if (*pos != '[') return NULL;
-    int depth = 1;
-    const char* start = pos + 1;
-    pos++;
-    while (*pos && depth > 0) {
-        if (*pos == '[') depth++;
-        else if (*pos == ']') depth--;
-        if (depth > 0) pos++;
-    }
-    if (depth != 0) return NULL;
-    size_t len = (size_t)(pos - start);
-    char* out = (char*)malloc(len + 1);
-    memcpy(out, start, len);
-    out[len] = '\0';
-    return out;
-}
-
-static int parse_config(const char* json) {
-    clear_config();
-    if (!json) return 0;
-    char* keys_obj = extract_json_object(json, "keys");
-    if (!keys_obj) { clear_config(); return 0; }
-    // Parse each key in the keys object
-    const char* pos = keys_obj;
+static void parse_quoted_models(KeyConfig* kc, const char* array) {
+    if (!kc || !array) return;
+    const char* pos = array;
     while (*pos) {
         while (*pos && *pos != '"') pos++;
         if (!*pos) break;
         pos++;
-        const char* key_start = pos;
-        while (*pos && *pos != '"') pos++;
-        if (!*pos) break;
-        size_t key_len = (size_t)(pos - key_start);
-        char* raw_key = (char*)malloc(key_len + 1);
-        memcpy(raw_key, key_start, key_len);
-        raw_key[key_len] = '\0';
-        pos++; // skip closing quote
-        while (*pos && ispace(*pos)) pos++;
-        if (*pos == ':') pos++;
-        while (*pos && ispace(*pos)) pos++;
-        if (*pos == '{') {
-            int depth = 1;
-            const char* obj_start = pos + 1;
+        const char* start = pos;
+        while (*pos && *pos != '"') {
+            if (*pos == '\\' && pos[1]) pos++;
             pos++;
-            while (*pos && depth > 0) {
-                if (*pos == '{') depth++;
-                else if (*pos == '}') depth--;
-                if (depth > 0) pos++;
-            }
-            size_t obj_len = (size_t)(pos - obj_start);
-            char* obj = (char*)malloc(obj_len + 1);
-            memcpy(obj, obj_start, obj_len);
-            obj[obj_len] = '\0';
-            // Hash the key
-            char* scope = hash_key(raw_key);
-            // Parse allowed_models from obj
-            char* arr = extract_json_array(obj, "allowed_models");
-            if (g_key_count < MAX_KEYS) {
-                KeyConfig* kc = &g_keys[g_key_count++];
-                strncpy(kc->scope, scope, 64);
-                kc->scope[64] = '\0';
-                kc->model_count = 0;
-                if (arr) {
-                    const char* ap = arr;
-                    while (*ap) {
-                        while (*ap && *ap != '"') ap++;
-                        if (!*ap) break;
-                        ap++;
-                        const char* val_start = ap;
-                        while (*ap && *ap != '"') ap++;
-                        if (!*ap) break;
-                        size_t vlen = (size_t)(ap - val_start);
-                        if (kc->model_count < MAX_MODELS) {
-                            kc->models[kc->model_count] = (char*)malloc(vlen + 1);
-                            memcpy(kc->models[kc->model_count], val_start, vlen);
-                            kc->models[kc->model_count][vlen] = '\0';
-                            kc->model_count++;
-                        }
-                        ap++;
-                    }
-                }
-                free(arr);
-            }
-            free(scope);
-            free(obj);
         }
-        free(raw_key);
+        if (!*pos) break;
+        add_model_config(kc, start, (size_t)(pos - start));
         pos++;
     }
-    free(keys_obj);
+}
+
+static int yaml_line_indent(const char* line, const char* end) {
+    int indent = 0;
+    while (line < end) {
+        if (*line == ' ') indent++;
+        else if (*line == '\t') indent += 2;
+        else break;
+        line++;
+    }
+    return indent;
+}
+
+static int yaml_line_is_key(const char* content, size_t len, const char* wanted) {
+    size_t wanted_len = strlen(wanted);
+    if (len < wanted_len + 1 || strncmp(content, wanted, wanted_len) != 0 || content[wanted_len] != ':') return 0;
+    return 1;
+}
+
+static char* yaml_mapping_key(const char* content, size_t len) {
+    const char* colon = memchr(content, ':', len);
+    if (!colon || colon == content) return NULL;
+    const char* value = colon + 1;
+    size_t value_len = len - (size_t)(value - content);
+    while (value_len > 0 && ispace((unsigned char)value[0])) { value++; value_len--; }
+    while (value_len > 0 && ispace((unsigned char)value[value_len - 1])) value_len--;
+    if (value_len != 0) return NULL;
+    return yaml_scalar_copy(content, (size_t)(colon - content));
+}
+
+static int parse_yaml_keys_config(const char* yaml) {
+    const char* line = yaml;
+    int keys_indent = -1;
+    int key_indent = -1;
+    int allowed_indent = -1;
+    KeyConfig* current = NULL;
+    int found = 0;
+
+    while (line && *line) {
+        const char* end = strchr(line, '\n');
+        if (!end) end = line + strlen(line);
+        const char* content = line;
+        int indent = yaml_line_indent(line, end);
+        content += indent;
+        size_t len = (size_t)(end - content);
+        while (len > 0 && (content[len - 1] == '\r' || ispace((unsigned char)content[len - 1]))) len--;
+
+        if (len > 0 && content[0] != '#') {
+            if (keys_indent < 0) {
+                if (yaml_line_is_key(content, len, "keys")) {
+                    keys_indent = indent;
+                    found = 1;
+                }
+            } else if (indent <= keys_indent) {
+                break;
+            } else if (key_indent < 0 || indent == key_indent) {
+                char* raw_key = yaml_mapping_key(content, len);
+                if (raw_key) {
+                    if (key_indent < 0) key_indent = indent;
+                    current = add_key_config(raw_key);
+                    free(raw_key);
+                    allowed_indent = -1;
+                }
+            } else if (current && yaml_line_is_key(content, len, "allowed_models")) {
+                const char* value = content + strlen("allowed_models") + 1;
+                size_t value_len = len - (size_t)(value - content);
+                while (value_len > 0 && ispace((unsigned char)value[0])) { value++; value_len--; }
+                if (value_len > 0 && value[0] == '[') {
+                    char* array = (char*)malloc(value_len + 1);
+                    if (array) {
+                        memcpy(array, value, value_len);
+                        array[value_len] = '\0';
+                        char* body = array + 1;
+                        char* close = strrchr(body, ']');
+                        if (close) *close = '\0';
+                        parse_quoted_models(current, body);
+                        free(array);
+                    }
+                    allowed_indent = -1;
+                } else {
+                    allowed_indent = indent;
+                }
+            } else if (current && allowed_indent >= 0 && indent > allowed_indent && content[0] == '-') {
+                const char* value = content + 1;
+                size_t value_len = len - 1;
+                while (value_len > 0 && ispace((unsigned char)value[0])) { value++; value_len--; }
+                add_model_config(current, value, value_len);
+            }
+        }
+        if (!*end) break;
+        line = end + 1;
+    }
+    return found;
+}
+
+static int parse_config(const char* text) {
+    clear_config();
+    if (!text) return 0;
+    parse_yaml_keys_config(text);
     return 0;
 }
 
@@ -464,9 +533,11 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
         // Return registration
         write_response(response,
             "{\"ok\":true,\"result\":{\"schema_version\":6,"
-            "\"metadata\":{\"Name\":\"key-model-restriction\",\"Version\":\"1.0.0\","
-            "\"Author\":\"cliproxy-plugin\","
-            "\"GitHubRepository\":\"https://github.com/router-for-me/cliproxy-key-model-restriction\"},"
+            "\"metadata\":{\"Name\":\"key-model-restriction\",\"Version\":\"" PLUGIN_VERSION "\","
+            "\"Author\":\"pedoc\","
+            "\"GitHubRepository\":\"https://github.com/pedoc/cliproxy-key-model-restriction\","
+            "\"ConfigFields\":[{\"Name\":\"keys\",\"Type\":\"object\","
+            "\"Description\":\"Map each API key to its allowed_models list. Empty or missing allowed_models means unrestricted.\"}]},"
             "\"capabilities\":{\"request_interceptor\":true}}}");
         return 0;
     }

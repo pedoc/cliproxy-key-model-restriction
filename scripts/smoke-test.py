@@ -132,13 +132,26 @@ def main(argv: list[str]) -> int:
         api.free_buffer(buffer.ptr, buffer.len)
         return json.loads(raw)
 
-    # The host base64-encodes config_yaml when delivering plugin.register.
-    config = json.dumps({"keys": {"sk-good": {"allowed_models": ["gpt-6-astra"]}}}).encode()
-    registration = call("plugin.register", {"config_yaml": base64.b64encode(config).decode()})
+    # The host base64-encodes the complete plugin config YAML. This is the
+    # direct object shape produced by the CPA Management Center object editor.
+    ui_config = b"""enabled: true
+priority: 100
+keys:
+  sk-good:
+    allowed_models:
+      - gpt-6-astra
+  sk-open:
+    allowed_models: []
+"""
+    registration = call("plugin.register", {"config_yaml": base64.b64encode(ui_config).decode()})
     if not registration.get("ok"):
         print(f"FAIL: plugin.register rejected the config: {registration}", file=sys.stderr)
         return 1
-    print("plugin.register ok")
+    fields = registration.get("result", {}).get("metadata", {}).get("ConfigFields", [])
+    if not any(field.get("Name") == "keys" and field.get("Type") == "object" for field in fields):
+        print(f"FAIL: registration did not advertise keys as an object field: {fields}", file=sys.stderr)
+        return 1
+    print("plugin.register ok: ConfigFields contains keys/object")
 
     allowed = "gpt-6-astra"
     blocked = "hy3-201"
@@ -148,7 +161,8 @@ def main(argv: list[str]) -> int:
     cases = [
         (allowed, {"caller_scope": scope}, False, "allowed model must pass"),
         (blocked, {"caller_scope": scope}, True, "non-allowed model must be terminated"),
-        (blocked, {}, False, "unknown key must pass (no restriction configured)"),
+        (blocked, {"caller_scope": caller_scope("sk-open")}, False, "empty allow-list must pass"),
+        (blocked, {"caller_scope": caller_scope("sk-unknown")}, False, "unknown key must pass"),
     ]
     for model, metadata, expect_terminate, label in cases:
         response = call(
