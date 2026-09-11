@@ -43,6 +43,15 @@ CallFn = ctypes.CFUNCTYPE(
     ctypes.c_size_t,
     ctypes.POINTER(Buffer),
 )
+HostCallFn = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+    ctypes.POINTER(Buffer),
+)
+HostFreeFn = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_size_t)
 FreeFn = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_size_t)
 ShutdownFn = ctypes.CFUNCTYPE(None)
 
@@ -51,8 +60,8 @@ class HostApi(ctypes.Structure):
     _fields_ = [
         ("abi_version", ctypes.c_uint32),
         ("host_ctx", ctypes.c_void_p),
-        ("call", ctypes.c_void_p),
-        ("free_buffer", ctypes.c_void_p),
+        ("call", HostCallFn),
+        ("free_buffer", HostFreeFn),
     ]
 
 
@@ -105,7 +114,19 @@ def main(argv: list[str]) -> int:
     init.restype = ctypes.c_int
     init.argtypes = [ctypes.POINTER(HostApi), ctypes.POINTER(PluginApi)]
 
-    host = HostApi(ABI_VERSION, None, None, None)
+    host_logs: list[dict] = []
+
+    @HostCallFn
+    def host_call(_host_ctx, method, request, request_len, response):
+        method_name = method.decode() if method else ""
+        raw_request = ctypes.string_at(request, request_len) if request and request_len else b""
+        if method_name == "host.log":
+            host_logs.append(json.loads(raw_request))
+        response.contents.ptr = None
+        response.contents.len = 0
+        return 0
+
+    host = HostApi(ABI_VERSION, None, host_call, HostFreeFn(lambda _ptr, _length: None))
     api = PluginApi()
     rc = init(ctypes.byref(host), ctypes.byref(api))
     if rc != 0:
@@ -175,6 +196,21 @@ keys:
         failures += 0 if ok else 1
         detail = f" status={result.get('StatusCode')}" if terminated else ""
         print(f"{'OK  ' if ok else 'FAIL'} {label}: model={model} Terminate={terminated}{detail}")
+
+    decision_logs = [entry for entry in host_logs if entry.get("fields", {}).get("plugin") == "key-model-restriction"]
+    if len(decision_logs) != len(cases):
+        print(f"FAIL: expected {len(cases)} host.log calls, got {len(decision_logs)}", file=sys.stderr)
+        failures += 1
+    else:
+        for entry in decision_logs:
+            fields = entry.get("fields", {})
+            if not fields.get("decision") or not fields.get("reason"):
+                print(f"FAIL: incomplete decision log: {entry}", file=sys.stderr)
+                failures += 1
+        print(f"host.log decision records: {len(decision_logs)}")
+    if any(entry.get("fields", {}).get("api_key") for entry in decision_logs):
+        print("FAIL: host.log contains forbidden api_key field", file=sys.stderr)
+        failures += 1
 
     return 1 if failures else 0
 

@@ -227,7 +227,39 @@ lib = ctypes.CDLL("./key-model-restriction-c.so")
 
 ---
 
-## 7. 流程纪律
+## 7. CPA 决策日志
+
+C ABI 宿主提供 `host.log` 回调，插件通过 `cliproxy_host_api.call` 调用它：
+
+```json
+{
+  "level": "warn",
+  "message": "key-model-restriction blocked request",
+  "fields": {
+    "plugin": "key-model-restriction",
+    "key_fingerprint": "<caller_scope 前 12 位>",
+    "model": "hy3-201",
+    "requested_model": "hy3-201",
+    "decision": "block",
+    "reason": "model_not_allowed",
+    "allowed_models": "gpt-5.6-luna, gpt-5.5",
+    "request_id": "...",
+    "trace_id": "..."
+  }
+}
+```
+
+日志查看：
+
+```bash
+journalctl --user -u cliproxyapi --no-pager | grep key-model-restriction
+```
+
+当前版本只记录 `caller_scope` 的前 12 位作为 `key_fingerprint`，不记录原始 API Key；不要为了查询日志而把原始 Key 放进命令行或 shell 历史。
+
+---
+
+## 8. 流程纪律
 
 1. **绝不修改用户的 `config.yaml`。** 用户手动改；插件配置由 config watcher 触发
    `plugin.reconfigure` **热加载**，改完不需要重启服务（实测有效）。
@@ -300,7 +332,7 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 | 安装方式 | 文件名 | 插件 ID / 配置键 |
 |---|---|---|
 | 手工拷贝 | `key-model-restriction-c.so` | `key-model-restriction-c` |
-| 商店安装 | `key-model-restriction-v1.1.0.so` | `key-model-restriction` |
+| 商店安装 | `key-model-restriction-v1.2.0.so` | `key-model-restriction` |
 
 两条路径的配置键**不一样**。键写错 → 插件加载成功、注册成功，
 但插件配置不会按预期下发 → **静默不拦截**，没有任何报错。

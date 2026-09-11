@@ -12,7 +12,7 @@
 #endif
 
 #define ABI_VERSION 1
-#define PLUGIN_VERSION "1.1.0"
+#define PLUGIN_VERSION "1.2.0"
 
 typedef struct {
     void* ptr;
@@ -39,6 +39,18 @@ typedef struct {
     cliproxy_plugin_free_fn free_buffer;
     cliproxy_plugin_shutdown_fn shutdown;
 } cliproxy_plugin_api;
+
+static const cliproxy_host_api* stored_host = NULL;
+
+static void key_fingerprint(const char* caller_scope, char out[13]) {
+    if (!out) return;
+    if (!caller_scope || strlen(caller_scope) < 12) {
+        strcpy(out, "unknown");
+        return;
+    }
+    memcpy(out, caller_scope, 12);
+    out[12] = '\0';
+}
 
 // ============================================================================
 // SHA256 (minimal implementation)
@@ -498,6 +510,70 @@ static void write_response(cliproxy_buffer* resp, const char* text) {
     resp->len = len;
 }
 
+static void call_host_log(const char* level, const char* message,
+                          const char* caller_scope, const char* model,
+                          const char* requested_model, const char* decision,
+                          const char* reason, const char* allowed_models,
+                          const char* request_id, const char* trace_id) {
+    if (!stored_host || !stored_host->call || !level || !message) return;
+    char key_id[13];
+    key_fingerprint(caller_scope, key_id);
+    char* level_esc = json_escape(level);
+    char* message_esc = json_escape(message);
+    char* key_id_esc = json_escape(key_id);
+    char* model_esc = json_escape(model ? model : "");
+    char* requested_esc = json_escape(requested_model ? requested_model : "");
+    char* decision_esc = json_escape(decision ? decision : "");
+    char* reason_esc = json_escape(reason ? reason : "");
+    char* allowed_esc = json_escape(allowed_models ? allowed_models : "");
+    char* request_id_esc = json_escape(request_id ? request_id : "");
+    char* trace_id_esc = json_escape(trace_id ? trace_id : "");
+    if (!level_esc || !message_esc || !key_id_esc || !model_esc ||
+        !requested_esc || !decision_esc || !reason_esc || !allowed_esc ||
+        !request_id_esc || !trace_id_esc) {
+        free(level_esc); free(message_esc); free(key_id_esc);
+        free(model_esc); free(requested_esc); free(decision_esc); free(reason_esc);
+        free(allowed_esc); free(request_id_esc); free(trace_id_esc);
+        return;
+    }
+
+    char* payload = format_string(
+        "{\"level\":\"%s\",\"message\":\"%s\",\"fields\":{"
+        "\"plugin\":\"key-model-restriction\","
+        "\"key_fingerprint\":\"%s\",\"model\":\"%s\","
+        "\"requested_model\":\"%s\",\"decision\":\"%s\","
+        "\"reason\":\"%s\",\"allowed_models\":\"%s\","
+        "\"request_id\":\"%s\",\"trace_id\":\"%s\"}}",
+        level_esc, message_esc, key_id_esc, model_esc, requested_esc,
+        decision_esc, reason_esc, allowed_esc, request_id_esc, trace_id_esc);
+    if (payload) {
+        cliproxy_buffer response = {0};
+        const uint8_t* request = (const uint8_t*)payload;
+        size_t request_len = strlen(payload);
+        int rc = stored_host->call(stored_host->host_ctx, "host.log", request, request_len, &response);
+        if (response.ptr && stored_host->free_buffer) stored_host->free_buffer(response.ptr, response.len);
+        (void)rc;
+    }
+    free(payload);
+    free(level_esc); free(message_esc); free(key_id_esc);
+    free(model_esc); free(requested_esc); free(decision_esc); free(reason_esc);
+    free(allowed_esc); free(request_id_esc); free(trace_id_esc);
+}
+
+static char* allowed_models_string(const KeyConfig* kc) {
+    if (!kc || kc->model_count == 0) return strdup("");
+    size_t capacity = 1;
+    for (int i = 0; i < kc->model_count; i++) capacity += strlen(kc->models[i]) + 2;
+    char* out = (char*)malloc(capacity);
+    if (!out) return NULL;
+    out[0] = '\0';
+    for (int i = 0; i < kc->model_count; i++) {
+        if (i > 0) strcat(out, ", ");
+        strcat(out, kc->models[i]);
+    }
+    return out;
+}
+
 // ============================================================================
 // Plugin call handler
 // ============================================================================
@@ -560,6 +636,8 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
         }
         // Extract models (JSON fields are PascalCase: "Model" = resolved upstream model,
         // "RequestedModel" = the model the client asked for before alias/pool rewriting).
+        char* request_id = extract_json_string(json, "RequestID");
+        char* trace_id = extract_json_string(json, "TraceID");
         char* model = extract_json_string(json, "Model");
         char* requested_model = extract_json_string(json, "RequestedModel");
         // Extract caller_scope from metadata
@@ -569,13 +647,19 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             caller_scope = extract_json_string(metadata, "caller_scope");
         }
         if (!caller_scope || strlen(caller_scope) == 0) {
-            free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
+            call_host_log("info", "key-model-restriction decision", NULL, model,
+                          requested_model, "allow", "missing_caller_scope", "", request_id, trace_id);
+            free(request_id); free(trace_id); free(model); free(requested_model);
+            free(caller_scope); free(metadata); free(json);
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
         const KeyConfig* kc = find_key_config(caller_scope);
         if (!kc) {
-            free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
+            call_host_log("info", "key-model-restriction decision", caller_scope, model,
+                          requested_model, "allow", "key_not_configured", "", request_id, trace_id);
+            free(request_id); free(trace_id); free(model); free(requested_model);
+            free(caller_scope); free(metadata); free(json);
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
@@ -587,6 +671,7 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
         if (!allowed && requested_model && strlen(requested_model) > 0 && model_allowed(kc, requested_model)) {
             allowed = 1;
         }
+        char* allowed_models = allowed_models_string(kc);
         if (!allowed) {
             // Report the model the client asked for when available.
             const char* display_model = (requested_model && strlen(requested_model) > 0) ? requested_model : model;
@@ -611,12 +696,20 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             char* result = format_string(
                 "{\"ok\":true,\"result\":{\"Terminate\":true,\"StatusCode\":403,\"ResponseBody\":\"%s\"}}",
                 body_b64 ? body_b64 : "");
+            call_host_log("warn", "key-model-restriction blocked request", caller_scope,
+                          model, requested_model, "block", "model_not_allowed",
+                          allowed_models, request_id, trace_id);
             write_response(response, result);
             free(model_esc); free(allowed_esc); free(body); free(body_b64); free(result);
-            free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
+            free(allowed_models); free(request_id); free(trace_id); free(model); free(requested_model);
+            free(caller_scope); free(metadata); free(json);
             return 0;
         }
-        free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
+        call_host_log("info", "key-model-restriction allowed request", caller_scope,
+                      model, requested_model, "allow", "model_allowed",
+                      allowed_models, request_id, trace_id);
+        free(allowed_models); free(request_id); free(trace_id); free(model); free(requested_model);
+        free(caller_scope); free(metadata); free(json);
         write_response(response, "{\"ok\":true,\"result\":{}}");
         return 0;
     }
@@ -631,6 +724,7 @@ static void plugin_free(void* ptr, size_t len) {
 
 static void plugin_shutdown(void) {
     clear_config();
+    stored_host = NULL;
 }
 
 // ============================================================================
@@ -639,7 +733,7 @@ static void plugin_shutdown(void) {
 
 CLIPROXY_EXPORT int cliproxy_plugin_init(const cliproxy_host_api* host, cliproxy_plugin_api* plugin) {
     if (!plugin) return 1;
-    (void)host;
+    stored_host = host;
     plugin->abi_version = ABI_VERSION;
     plugin->call = plugin_call;
     plugin->free_buffer = plugin_free;
