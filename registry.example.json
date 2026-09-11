@@ -6,7 +6,7 @@
       "name": "Key Model Restriction",
       "description": "Supports a global default allow/deny rule plus per-key overrides. Unconfigured keys inherit the default; legacy empty allowed_models and unrestricted: true remain unrestricted.",
       "author": "pedoc",
-      "version": "1.4.0",
+      "version": "1.4.1",
       "repository": "https://github.com/pedoc/cliproxy-key-model-restriction",
       "homepage": "https://github.com/pedoc/cliproxy-key-model-restriction",
       "license": "MIT",

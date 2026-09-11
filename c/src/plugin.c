@@ -12,7 +12,7 @@
 #endif
 
 #define ABI_VERSION 1
-#define PLUGIN_VERSION "1.4.0"
+#define PLUGIN_VERSION "1.4.1"
 
 typedef struct {
     void* ptr;
@@ -297,9 +297,13 @@ static int model_in_list(char* const* models, int count, const char* model) {
     return 0;
 }
 
+static int model_denied(const ModelRule* rule, const char* model) {
+    return rule && model && *model && model_in_list(rule->denied_models, rule->denied_count, model);
+}
+
 static int model_allowed(const ModelRule* rule, const char* model) {
     if (!rule || !model || !*model || !rule->has_rule || rule->unrestricted) return 1;
-    if (model_in_list(rule->denied_models, rule->denied_count, model)) return 0;
+    if (model_denied(rule, model)) return 0;
     if (rule->allowed_count > 0) return model_in_list(rule->allowed_models, rule->allowed_count, model);
     return 1;
 }
@@ -776,13 +780,8 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
         }
         const KeyConfig* kc = find_key_config(caller_scope);
         const ModelRule* rule = effective_rule(kc);
-        int allowed = 0;
-        if (model && strlen(model) > 0 && model_allowed(rule, model)) {
-            allowed = 1;
-        }
-        if (!allowed && requested_model && strlen(requested_model) > 0 && model_allowed(rule, requested_model)) {
-            allowed = 1;
-        }
+        int denied = model_denied(rule, model) || model_denied(rule, requested_model);
+        int allowed = !denied && (model_allowed(rule, model) || model_allowed(rule, requested_model));
         char* allowed_models = rule_models_string(rule);
         if (!allowed) {
             // Report the model the client asked for when available.

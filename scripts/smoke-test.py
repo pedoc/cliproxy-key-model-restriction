@@ -155,32 +155,24 @@ def main(argv: list[str]) -> int:
 
     # The host base64-encodes the complete plugin config YAML. This is the
     # direct object shape produced by the CPA Management Center object editor.
-    configured_key = "sk-good-1234567890abcdef"
-    masked_key = "sk-good-...cdef"
-    override_key = "sk-override-1234567890"
-    exempt_key = "sk-exempt-1234567890"
-    legacy_key = "sk-legacy-1234567890"
+    configured_key = "sk-test-configured-1234567890abcdef"
+    exception_key = "sk-test-exception-1234567890"
     ui_config = f"""enabled: true
 priority: 100
-default:
-  allowed_models:
-    - gpt-6-astra
-    - global-safe
-  denied_models:
-    - hy3-201
 keys:
   {configured_key}:
     allowed_models:
-      - claude-4
-  {override_key}:
-    allowed_models:
-      - claude-4
-    denied_models:
-      - claude-4
-  {exempt_key}:
+      - gpt-5.6-luna
+      - gpt-5.5
+  {exception_key}:
     unrestricted: true
-  {legacy_key}:
-    allowed_models: []
+default:
+  denied_models:
+    - hy3-201
+    - hy3-preview-201
+    - hy3-preview-agent-201
+    - hy4-preview-201
+    - LongCat-2.0-201
 """.encode()
     registration = call("plugin.register", {"config_yaml": base64.b64encode(ui_config).decode()})
     if not registration.get("ok"):
@@ -193,30 +185,39 @@ keys:
         return 1
     print("plugin.register ok: ConfigFields contains default/keys objects")
 
-    allowed = "gpt-6-astra"
-    blocked = "hy3-201"
+    def mask_for_test_key(api_key):
+        if not api_key:
+            return "unknown"
+        return api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
+
     failures = 0
     cases = [
-        (allowed, {"caller_scope": caller_scope("sk-unknown")}, False, "global allowed model must pass"),
-        (blocked, {"caller_scope": caller_scope("sk-unknown")}, True, "global denied model must terminate"),
-        ("claude-4", {"caller_scope": caller_scope(configured_key)}, False, "key override allowed model must pass"),
-        (allowed, {"caller_scope": caller_scope(configured_key)}, True, "key override must ignore global allowed list"),
-        ("claude-4", {"caller_scope": caller_scope(override_key)}, True, "denied model wins over allowed model"),
-        (blocked, {"caller_scope": caller_scope(exempt_key)}, False, "explicit unrestricted must pass"),
-        (blocked, {"caller_scope": caller_scope(legacy_key)}, False, "legacy empty allow-list must pass"),
-        (blocked, {}, False, "missing caller scope must pass"),
+        ("gpt-5.6-luna", "gpt-5.6-luna", "sk-unknown", False, "global non-denied model must pass"),
+        ("codex-auto-review", "codex-auto-review", "sk-unknown", False, "codex model is outside denied list"),
+        ("hy3-201", "hy3-201", "sk-unknown", True, "global denied model must terminate"),
+        ("hy3-preview-201", "hy3-preview-201", "sk-unknown", True, "global denied preview must terminate"),
+        ("gpt-5.6-luna", "gpt-5.6-luna", configured_key, False, "configured key allowed model must pass"),
+        ("gpt-5.5", "gpt-5.5", configured_key, False, "configured key second allowed model must pass"),
+        ("gpt-6-astra", "gpt-6-astra", configured_key, True, "configured key other GPT must terminate"),
+        ("hy3-201", "hy3-201", configured_key, True, "configured key non-GPT must terminate"),
+        ("hy3-201", "hy3-201", exception_key, False, "exception key denied model must pass"),
+        ("LongCat-2.0-201", "LongCat-2.0-201", exception_key, False, "exception key LongCat must pass"),
+        ("hy3", "hy3-201", "sk-unknown", True, "denied resolved alias must terminate"),
+        ("hy3-201", "hy3", "sk-unknown", True, "denied requested alias must terminate"),
+        ("gpt-5.6-luna", "gpt-5.6-luna", None, False, "missing caller scope must pass"),
     ]
-    for model, metadata, expect_terminate, label in cases:
+    for model, requested_model, api_key, expect_terminate, label in cases:
+        metadata = {"caller_scope": caller_scope(api_key)} if api_key else {}
         response = call(
             "request.intercept_after",
-            {"Model": model, "RequestedModel": model, "Metadata": metadata},
+            {"Model": model, "RequestedModel": requested_model, "Metadata": metadata},
         )
         result = response.get("result") or {}
         terminated = bool(result.get("Terminate"))
         ok = terminated == expect_terminate
         failures += 0 if ok else 1
         detail = f" status={result.get('StatusCode')}" if terminated else ""
-        print(f"{'OK  ' if ok else 'FAIL'} {label}: model={model} Terminate={terminated}{detail}")
+        print(f"{'OK  ' if ok else 'FAIL'} {label}: Model={model} RequestedModel={requested_model} Terminate={terminated}{detail}")
 
     decision_logs = [entry for entry in host_logs if entry.get("fields", {}).get("plugin") == "key-model-restriction"]
     if len(decision_logs) != len(cases):
@@ -234,12 +235,15 @@ keys:
             if "api_key_masked=" not in entry.get("message", ""):
                 print(f"FAIL: masked API key is not visible in log message: {entry}", file=sys.stderr)
                 failures += 1
-            expected_masked = ("unknown", "unknown", masked_key, masked_key,
-                               "sk-overr...7890", "sk-exemp...7890", "sk-legac...7890", "unknown")[index]
+            expected_masked = ("unknown", "unknown", "unknown", "unknown",
+                               mask_for_test_key(configured_key), mask_for_test_key(configured_key),
+                               mask_for_test_key(configured_key), mask_for_test_key(configured_key),
+                               mask_for_test_key(exception_key), mask_for_test_key(exception_key),
+                               "unknown", "unknown", "unknown")[index]
             if fields.get("api_key_masked") != expected_masked:
                 print(f"FAIL: masked API key = {fields.get('api_key_masked')!r}, want {expected_masked!r}", file=sys.stderr)
                 failures += 1
-            expected_source = "none" if index == len(cases) - 1 else ("key" if index >= 2 and index <= 6 else "default")
+            expected_source = "none" if index == len(cases) - 1 else ("key" if index >= 4 and index <= 9 else "default")
             if fields.get("rule_source") != expected_source:
                 print(f"FAIL: rule source = {fields.get('rule_source')!r}, want {expected_source!r}", file=sys.stderr)
                 failures += 1

@@ -349,7 +349,7 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 - [ ] `gcc` 编译无 warning
 - [ ] 本地 ctypes 隔离测试通过（含边界：空 `allowed_models`、别名、不存在的 scoped key）
 - [ ] 远程三种场景回归：允许 → 非 403；不允许 → 403 **且 body 有内容**；无全局规则时未配置 key → 放行
-- [ ] 全局规则回归：未配置 key 继承 `default`；Key 专属规则覆盖 `default`；`unrestricted: true` 和旧 `allowed_models: []` 绕过全局规则；`denied_models` 优先；日志包含 `rule_source`
+- [ ] 全局规则回归：未配置 key 继承 `default`；Key 专属规则覆盖 `default`；`unrestricted: true` 和旧 `allowed_models: []` 绕过全局规则；`denied_models` 优先；`Model`/`RequestedModel` 任一命中即拒绝；日志包含 `rule_source`
 - [ ] 403 body 里含 `code` 字段，便于客户端识别
 - [ ] `scripts/smoke-test.py` 通过（等价于宿主 dlopen + 函数表调用）
 - [ ] 发布版：6 个平台 zip 齐全、`checksums.txt` 行数 = zip 个数、zip 根目录只有 `<id>.<ext>`

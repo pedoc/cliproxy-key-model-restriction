@@ -163,8 +163,8 @@ The UI editor uses JSON for object fields, so this is also valid in the `keys` f
 | no `default` and key absent | no restriction |
 
 Matching is case-insensitive. A request is allowed if **either** the requested model name or the
-resolved upstream model name passes the effective rule. A denied model always wins over an allowed
-model.
+resolved upstream model name passes the effective rule. For `denied_models`, a match in **either**
+field denies the request, so aliases cannot bypass the deny list.
 
 ## Decision Logs
 
