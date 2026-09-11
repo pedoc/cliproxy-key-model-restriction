@@ -57,7 +57,8 @@ plugins:
 > **Note:** the key under `configs:` must match the plugin's **file name** (without the `.so`
 > suffix), not the display name in the plugin metadata. Since `build.sh` produces
 > `key-model-restriction-c.so`, the config key is `key-model-restriction-c`. If you rename the
-> file when deploying (e.g. `key_model_restriction.so`), rename the config key to match.
+> `.so` when deploying, rename the config key to match — otherwise your `config_yaml` is never
+> delivered and the plugin silently applies no restriction.
 
 | Config state | Effect |
 |---|---|
