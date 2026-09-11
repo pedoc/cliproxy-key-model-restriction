@@ -116,6 +116,32 @@ strings <server-binary> | grep -o 'response_body\|response_headers' | sort | uni
 - 目录结构对齐官方：`c/src/plugin.c` + `c/CMakeLists.txt`，
   产物名即插件 ID（`key-model-restriction-c.so` → ID `key-model-restriction-c`）。
 
+### 只导出 `cliproxy_plugin_init` 就够了（别去"补齐"其它符号）
+
+`internal/pluginhost/loader_unix.go` 全程只做**一次** `dlsym`：
+
+```
+initSymbol := C.cliproxy_dlsym(handle, C.CString("cliproxy_plugin_init"))
+```
+
+`call` / `free_buffer` / `shutdown` **不走符号查找**，而是 init 通过函数表回填：
+
+```
+plugin->abi_version = ABI_VERSION;   // 必须等于 pluginabi.ABIVersion（当前 1）
+plugin->call        = plugin_call;
+plugin->free_buffer = plugin_free;
+plugin->shutdown    = plugin_shutdown;
+```
+
+宿主只校验三件事：`rc == 0`、`abi_version == 1`、`call != nil && free_buffer != nil`。
+
+**所以 `nm -D` 只看到 1 个导出符号是正确的，不是缺符号。**
+（本次交付时我一度误判为"导出缺失"，实际是拿错了判据。）
+
+> 校验产物别用"数导出符号个数"，用 `scripts/smoke-test.py`——
+> 它完整复刻宿主流程：dlopen → dlsym init → 通过函数表调用 call，
+> 并真实跑通"白名单放行 / 非白名单 403 / 未配置 key 放行"三种场景。
+
 ---
 
 ## 3. `caller_scope` 哈希：前缀含 `\x00`
@@ -237,10 +263,57 @@ strings /home/dev01/cliproxyapi/cli-proxy-api | grep -o '<field>' | wc -l
 
 ---
 
-## 9. 上线前 checklist
+## 9. 发布到插件商店（远程安装，而不是手工拷 `.so`）
+
+宿主支持 "registry 索引 + GitHub Releases" 的安装方式，入口在管理 API：
+
+| 接口 | 作用 |
+|---|---|
+| `GET /v0/management/plugin-store` | 列出商店插件（含 `installed` / `update_available`） |
+| `POST /v0/management/plugin-store/:id/install` | 安装（`?source=` 选源，`?version=` 选版本） |
+| `DELETE /v0/management/plugins/:id` | 卸载（删文件 + 删配置） |
+
+### 产物命名是硬约定（`internal/pluginstore`）
+
+按**精确名称**找资产，写错直接 `release asset ... not found`：
+
+- 压缩包：`<id>_<version>_<goos>_<goarch>.zip`
+- 校验文件：`checksums.txt`，格式 `<sha256>  <文件名>`（两列）
+- tag：`v<version>`，宿主会去掉前导 `v` 并要求结果合法
+- **zip 根目录**放 `<id>.so`（或 `<id>-v<version>.so`），且只能有一个动态库
+- 落地路径：`plugins/<goos>/<goarch>/<id>-v<version>.so`（不再是平铺）
+
+Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 409 + `restart_required`）。
+
+### 本仓库的做法
+
+- `scripts/build-release.sh`：`zig cc` 单工具链交叉编译 6 个目标平台并打包
+- `.github/workflows/release.yml`：推 `v*` tag → 编译 → 断言布局 → 冒烟测试 → `gh release create`
+- `registry.example.json`：自建 registry 索引的样板
+
+**坑：本机 binutils 解析不了 Mach-O / ARM64 PE**（`file format not recognized`），
+所以校验 darwin/windows 产物时要自己解析导出表（见 `smoke-test.py` 思路），
+不能靠 `nm` / `objdump` 的输出来判断符号有无。
+
+### ⚠️ 最容易翻车：插件 ID 就是配置键
+
+| 安装方式 | 文件名 | 插件 ID / 配置键 |
+|---|---|---|
+| 手工拷贝 | `key-model-restriction-c.so` | `key-model-restriction-c` |
+| 商店安装 | `key-model-restriction-v1.0.0.so` | `key-model-restriction` |
+
+两条路径的配置键**不一样**。键写错 → 插件加载成功、注册成功，
+但 `config_yaml` 不会下发 → **静默不拦截**，没有任何报错。
+
+---
+
+## 10. 上线前 checklist
 
 - [ ] `gcc` 编译无 warning
 - [ ] 本地 ctypes 隔离测试通过（含边界：空 `allowed_models`、别名、不存在的 scoped key）
 - [ ] 远程三种场景回归：允许 → 非 403；不允许 → 403 **且 body 有内容**；未配置 key → 放行
 - [ ] 403 body 里含 `code` 字段，便于客户端识别
+- [ ] `scripts/smoke-test.py` 通过（等价于宿主 dlopen + 函数表调用）
+- [ ] 发布版：6 个平台 zip 齐全、`checksums.txt` 行数 = zip 个数、zip 根目录只有 `<id>.<ext>`
+- [ ] 若走商店安装：确认 `plugins.configs` 的键 = 插件 ID（不是 `.so` 旧文件名）
 - [ ] 改动已 commit，并写清"根因 + 验证方式"

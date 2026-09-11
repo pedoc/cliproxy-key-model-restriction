@@ -6,3 +6,4 @@
 .vscode/
 .idea/
 .codebuddy/memory/20*.md
+dist/

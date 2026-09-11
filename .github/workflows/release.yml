@@ -1,0 +1,123 @@
+name: release
+
+# Pushing a "v<version>" tag publishes a CLIProxyAPI plugin store release.
+# Branch pushes and pull requests only prove that the sources still build.
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build plugin store artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install zip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zip
+
+      # zig is the entire cross-compilation toolchain: a single install covers
+      # linux/darwin/windows on both amd64 and arm64. It is downloaded directly
+      # rather than via a third-party action so the toolchain version stays
+      # pinned to the one scripts/build-release.sh is validated against.
+      - name: Install zig
+        run: |
+          set -euo pipefail
+          version=0.13.0
+          archive="zig-linux-x86_64-${version}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://ziglang.org/download/${version}/${archive}" -o "/tmp/${archive}"
+          tar -C /tmp -xf "/tmp/${archive}"
+          echo "/tmp/zig-linux-x86_64-${version}" >> "$GITHUB_PATH"
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: ./scripts/build-release.sh
+
+      # The store looks up assets by exact name and requires the library to sit
+      # at the zip root, so a layout regression would break installs silently.
+      - name: Assert plugin store layout
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          id=key-model-restriction
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            goos="${target%%/*}"
+            goarch="${target##*/}"
+            case "${goos}" in
+              darwin) ext=dylib ;;
+              windows) ext=dll ;;
+              *) ext=so ;;
+            esac
+            archive="dist/${id}_${VERSION}_${goos}_${goarch}.zip"
+            if [[ ! -f "${archive}" ]]; then
+              echo "::error::missing archive ${archive}"
+              exit 1
+            fi
+            entries="$(unzip -Z1 "${archive}")"
+            if [[ "${entries}" != "${id}.${ext}" ]]; then
+              echo "::error::${archive} must contain exactly ${id}.${ext} at its root, got: ${entries}"
+              exit 1
+            fi
+            echo "ok ${archive} -> ${entries}"
+          done
+          ( cd dist && sha256sum -c checksums.txt )
+          expected=$(ls -1 dist/*.zip | wc -l)
+          actual=$(wc -l < dist/checksums.txt)
+          if [[ "${expected}" -ne "${actual}" ]]; then
+            echo "::error::checksums.txt lists ${actual} entries but ${expected} archives exist"
+            exit 1
+          fi
+
+      # Loads the built library through the same dlopen/dlsym path the server
+      # uses and exercises the interceptor, so a broken ABI fails the build.
+      - name: Smoke test linux/amd64 artifact
+        run: python3 scripts/smoke-test.py dist/key-model-restriction_*_linux_amd64.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-store-artifacts
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*.zip dist/checksums.txt

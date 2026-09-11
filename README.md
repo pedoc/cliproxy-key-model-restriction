@@ -29,6 +29,68 @@ Copy the compiled `.so` file to your CLIProxyAPI plugins directory:
 cp key-model-restriction-c.so /path/to/CLIProxyAPI/plugins/
 ```
 
+## Install from the plugin store
+
+CLIProxyAPI can install plugins from a registry index instead of copying files by
+hand. This repository ships everything needed for that flow:
+
+| File | Purpose |
+|---|---|
+| `scripts/build-release.sh` | cross-compiles every supported platform into the exact release layout the store expects |
+| `.github/workflows/release.yml` | runs that script on a `v*` tag and publishes the GitHub release |
+| `scripts/smoke-test.py` | loads a built library through the server's own `dlopen` path and exercises the interceptor |
+| `registry.example.json` | a registry index you can host yourself |
+
+Publish a version by pushing a tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow then publishes a release whose assets are:
+
+```
+key-model-restriction_1.0.0_linux_amd64.zip
+key-model-restriction_1.0.0_linux_arm64.zip
+key-model-restriction_1.0.0_darwin_amd64.zip
+key-model-restriction_1.0.0_darwin_arm64.zip
+key-model-restriction_1.0.0_windows_amd64.zip
+key-model-restriction_1.0.0_windows_arm64.zip
+checksums.txt
+```
+
+Each zip holds `key-model-restriction.<ext>` at its root, and `checksums.txt`
+lists the SHA256 of every archive — both are required by the store.
+
+Install it through the management API:
+
+```bash
+curl -X POST \
+  "http://127.0.0.1:8317/v0/management/plugin-store/key-model-restriction/install" \
+  -H "Authorization: Bearer <management-secret-key>"
+```
+
+> **The plugin id becomes the config key.** A store install writes
+> `plugins/linux/amd64/key-model-restriction-v1.0.0.so` and enables
+> `plugins.configs.key-model-restriction`, so `config_yaml` must live under the
+> `key-model-restriction` key rather than `key-model-restriction-c`. A mismatched
+> key means the plugin loads but silently applies no restriction.
+
+Private repositories need credentials. Only the environment variable *name* goes
+into the config:
+
+```yaml
+plugins:
+  store-sources:
+    - https://raw.githubusercontent.com/<you>/<your-store>/main/registry.json
+  store-auth:
+    - match: https://github.com/<you>/
+      apply-to: [metadata, artifact]
+      type: github-token
+      token-env: GITHUB_PLUGIN_TOKEN
+```
+
 ## Configuration
 
 In your `config.yaml`:
@@ -79,13 +141,18 @@ resolved upstream model name is in the allow-list.
 
 ```
 cliproxy-key-model-restriction/
+├── .github/workflows/release.yml   # tag -> cross-compile -> publish release
 ├── c/
 │   ├── CMakeLists.txt
 │   └── src/
-│       └── plugin.c
-├── build.sh
+│       └── plugin.c                # the plugin implementation
+├── scripts/
+│   ├── build-release.sh            # builds plugin store release assets
+│   └── smoke-test.py               # loads a build and exercises the ABI
+├── build.sh                        # local single-platform build
 ├── config.example.json
-├── dev.md
+├── registry.example.json
+├── dev.md                          # lessons learned / gotchas
 └── README.md
 ```
 
