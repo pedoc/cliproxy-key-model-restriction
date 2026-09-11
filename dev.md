@@ -1,11 +1,11 @@
 # dev.md — 开发经验与避坑指南
 
 本插件（`cliproxy-key-model-restriction`）开发过程中踩过的坑与流程教训。改动前请先扫一遍，
-尤其是第 1、7、8 节。
+尤其是第 1、5、6、7、8、9、11、12 节。
 
 ---
 
-## 0. 最容易踩的 5 个坑（速查）
+## 0. 最容易踩的 8 个坑（速查）
 
 | # | 坑 | 后果 | 正确做法 |
 |---|---|---|---|
@@ -13,7 +13,10 @@
 | 2 | 想用 Go 写插件（`-buildmode=plugin`） | 与该服务运行时冲突，**服务启动卡死**（进程在、端口不监听、无报错） | 用 **C** 写，导出 C ABI |
 | 3 | SHA256 前缀含 `\x00`，用 `strlen` 取长度 | 哈希输入少一个字节 → `caller_scope` 永不匹配 | 用 `sizeof(prefix) - 1` |
 | 4 | `config_yaml` / `[]byte` 字段当普通字符串处理 | 配置/响应体解析失败 | Go 的 `[]byte` 在 JSON 里是 **base64**，要解码/编码 |
-| 5 | 只匹配 `Model`（解析后的上游名） | 用户把客户端模型名写进白名单会静默失效 | `Model` 与 `RequestedModel` **任一命中**即放行 |
+| 5 | 只匹配 `Model`（解析后的上游名） | 用户把客户端模型名写进白名单会静默失效 | 允许列表：任一字段命中即可；拒绝列表：任一字段命中就拒绝 |
+| 6 | 把全局规则和 Key 规则混合计算 | 例外 Key 仍被全局规则误伤，配置意图无法解释 | Key 有自己的规则时**完整覆盖** `default`；没有专属规则才继承 `default` |
+| 7 | 把业务分类当成模型匹配规则 | `codex-auto-review` 虽被业务归类为 GPT，插件不会自动识别分类 | 插件只做**精确字符串匹配**；是否允许由 `default` 或 Key 白名单决定 |
+| 8 | 只看 HTTP 状态码判断插件是否生效 | 上游 400、宿主兜底 403、插件 403 容易混淆 | 同时检查完整 body、插件 `host.log` 的 `decision/reason/rule_source` 和服务启动日志 |
 
 ---
 
@@ -195,11 +198,76 @@ Go 的 `encoding/json` 会把 `[]byte` 编成 base64 字符串，解码时也按
 **只匹配 `Model` 的坑：** 用户把 `hy3-201`（客户端名）写进白名单，永远匹配不上，
 但用户看到的是自己请求的 `hy3-201`，会以为配置无效，极难排查。
 
-**当前实现：任一命中即放行**，且 403 信息里显示**客户端请求名**（用户更直观）。
+**当前实现：**允许列表对 `Model` / `RequestedModel` 任一命中即可放行；拒绝列表对任一字段命中即拒绝。403 信息里显示**客户端请求名**（用户更直观）。
 
 ---
 
-## 6. 调试方法论（这次绕弯的根本原因）
+## 6. 全局规则与 Key 专属规则
+
+### 推荐配置模型
+
+```yaml
+keys:
+  <key-a>:
+    allowed_models:
+      - gpt-5.6-luna
+      - gpt-5.5
+  <key-b>:
+    unrestricted: true
+
+default:
+  denied_models:
+    - hy3
+    - hy3-201
+```
+
+CPA Management Center 的 `ConfigField` 是 `object`，UI 编辑框实际填写的是 JSON；插件收到后，宿主通过注册 RPC 的 `config_yaml` 字段以 base64 传递 YAML。因此要区分两层：
+
+- UI 的 `default` 编辑框：填写 `{ "denied_models": ["hy3-201"] }`；
+- UI 的 `keys` 编辑框：填写 `{ "<key>": { "unrestricted": true } }`；
+- 只有填写整个插件对象时，才使用 `{ "default": {...}, "keys": {...} }`；
+- 不要把宿主外层的 `plugins.configs`、`enabled`、`priority` 粘贴进单独的 `default` 或 `keys` 编辑框。
+
+### 规则优先级
+
+1. Key 有 `unrestricted: true` → 该 Key 全部放行；
+2. Key 有自己的 `allowed_models` 或 `denied_models` → 完整覆盖 `default`，不与全局列表合并；
+3. Key 未配置专属规则 → 继承 `default`；
+4. `default` 缺失或没有有效限制 → 保持旧行为，默认放行；
+5. 同一条规则的 `denied_models` 优先于 `allowed_models`；
+6. 旧格式 `allowed_models: []` 继续表示该 Key 不限制，不能改解释为继承全局。
+
+这个设计支持“全局禁止少量模型 + 单个 Key 全部放行”，也支持“某个 Key 只允许两个模型”。关键是不要把全局和 Key 列表混合计算，否则配置意图会变得不可读。
+
+### 为什么用户的配置里 `codex-auto-review` 会有两种结果
+
+`codex-auto-review` 没有出现在全局 `default.denied_models`，所以未配置 Key 使用全局规则时会放行。可是如果某个 Key 自己配置了：
+
+```yaml
+allowed_models:
+  - gpt-5.6-luna
+  - gpt-5.5
+```
+
+那么它只允许这两个精确名称，`codex-auto-review` 即使按业务分类属于 GPT 系列，也会被这个 Key 的专属白名单拒绝。分类是人的约定，插件只做字符串精确匹配。
+
+### 最终验收矩阵
+
+以“全局禁用部分模型 + 一个 Key 完全放行 + 一个 Key 只允许两个模型”为例，验收至少覆盖：
+
+| Key 类型 | 请求模型 | 预期结果 | 规则来源 |
+|---|---|---:|---|
+| 未配置 Key | 不在 `default.denied_models` | 放行 | `default` |
+| 未配置 Key | 在 `default.denied_models` | 403 | `default` |
+| Key 白名单 | 白名单中的模型 | 放行 | `key` |
+| Key 白名单 | 不在白名单中的模型（包括 `codex-auto-review`） | 403 | `key` |
+| `unrestricted: true` | 任意模型 | 放行 | `key` |
+
+测试结果不能只看“插件是否收到请求”，还要核对 `host.log` 中的 `decision`、`reason`、`rule_source`，以及最终 HTTP body。
+
+---
+
+## 7. 调试方法论（这次绕弯的根本原因）
 
 ### ✅ 应该这样做
 1. **先隔离，再端到端。** 用 Python `ctypes` 直接 `dlopen` 插件 `.so`，喂假请求、看原始输出。
@@ -207,11 +275,16 @@ Go 的 `encoding/json` 会把 `[]byte` 编成 base64 字符串，解码时也按
 2. **要证据，不要猜测。** 每个结论都要有可观测证据（原始 JSON、哈希对比、二进制 strings）。
 3. **一次只动一个变量**，改完立刻验证。
 4. **确认"成功"的来源。** 见第 1 节的兜底默认值陷阱。
+5. **先用 `/v1/models` 获取实时模型名。** 不要只扫描静态配置或凭模型前缀猜测；最终允许/拒绝仍以插件配置中的精确字符串为准。
+6. **把别名作为独立测试维度。** 至少分别测试 `Model` 命中、`RequestedModel` 命中和两者不同的情况。
 
 ### ❌ 不要这样做
 - 在没定位根因前反复改代码 + 重启，指望"这次也许好了"
 - 同时改多个地方，导致无法判断是哪个改动生效
 - 只看 HTTP 状态码就下结论（要看完整 body + headers）
+- 把 HTTP 400 直接等同于“插件放行”：400 可能来自上游模型解析失败；必须结合插件日志确认是否出现 `blocked request`。
+- 把“请求通过插件”误认为“请求最终成功”：插件放行后仍可能被上游拒绝，放行证据应看插件日志，最终结果另看 HTTP 响应。
+- 把真实 API Key 写进测试脚本、命令历史或仓库：本地隔离测试必须使用占位 Key；线上测试只在远程进程内使用，并输出掩码值。
 
 ### 隔离测试脚本模板
 ```python
@@ -225,9 +298,24 @@ lib = ctypes.CDLL("./key-model-restriction-c.so")
 # plugin.call(b"request.intercept_after", ...)  # 再喂拦截请求，打印原始输出
 ```
 
+### 配置回归必须覆盖的最小集合
+
+对当前规则模型，至少用占位 Key 覆盖以下 8 类：
+
+1. 未配置 Key + 普通允许模型 → 放行；
+2. 未配置 Key + `default.denied_models` 中的模型 → 拒绝；
+3. Key 专属 `allowed_models` 中的模型 → 放行；
+4. Key 专属白名单之外的模型 → 拒绝；
+5. Key 专属 `unrestricted: true` + 全局拒绝模型 → 放行；
+6. 旧格式 `allowed_models: []` + 全局拒绝模型 → 放行；
+7. `Model` 与 `RequestedModel` 分别命中拒绝列表 → 都拒绝；
+8. 重配置后检查旧规则没有残留。
+
+测试断言应同时检查：`Terminate`、`StatusCode`、`ResponseBody`、`host.log` 的 `decision` / `reason` / `rule_source`。
+
 ---
 
-## 7. CPA 决策日志
+## 8. CPA 决策日志
 
 C ABI 宿主提供 `host.log` 回调，插件通过 `cliproxy_host_api.call` 调用它：
 
@@ -254,17 +342,50 @@ C ABI 宿主提供 `host.log` 回调，插件通过 `cliproxy_host_api.call` 调
 日志查看：
 
 ```bash
-journalctl --user -u cliproxyapi --no-pager | grep key-model-restriction
+# 服务启动、插件加载和注册信息
+journalctl --user -u cliproxyapi --no-pager -n 30
+
+# 插件决策日志（CPA 默认写入文件）
+grep 'key-model-restriction' /home/dev01/.cli-proxy-api/logs/main.log | tail -20
 ```
 
+本次实测中，`journalctl` 主要显示服务 stdout 和启动信息，插件决策日志实际出现在
+`/home/dev01/.cli-proxy-api/logs/main.log`。不要只查错日志位置。
 CPA 默认日志格式会显示消息文本中的 `api_key_masked=... key_fingerprint=<12 位指纹>`；自定义 `fields` 可能不会全部展示。
 当前版本记录配置 API Key 的前 8 位和后 4 位作为 `api_key_masked`，不会记录完整 API Key。
-`rule_source` 为 `default` 或 `key`，用于确认本次请求采用了全局规则还是 Key 专属覆盖。
+`rule_source` 为 `default`、`key` 或 `none`，用于确认本次请求采用了全局规则、Key 专属覆盖，还是缺少 caller scope。
 全局规则中 `denied_models` 优先于 `allowed_models`；Key 一旦配置自己的规则，就不再和全局列表合并。
+
+### 日志字段不是最终结果
+
+一次请求至少有三层结果，必须分开记录：
+
+1. **插件决策**：`host.log` 的 `decision`、`reason`、`rule_source`；
+2. **宿主处理**：是否把插件返回的 `Terminate`、`StatusCode`、`ResponseBody` 正确合并到 HTTP 响应；
+3. **上游结果**：请求放行后，上游是否接受模型、认证和请求参数。
+
+因此：
+
+- 插件日志 `blocked request` + HTTP 403 → 插件拦截成功；
+- 插件日志 `allowed request` + HTTP 200 → 插件放行且上游成功；
+- 插件日志 `allowed request` + HTTP 400/401/5xx → 插件放行，但上游或宿主后续失败；
+- HTTP 400 本身不能证明插件放行，必须先看是否有对应的 `blocked request` 日志。
+
+本次线上验收中，`hy3` 请求出现 HTTP 400，但插件已经记录 `blocked request`，所以它不是绕过限制，而是拦截后链路仍返回了不同状态码。遇到这种情况要用请求时间、trace/request ID 和日志内容关联，而不能只看状态码。
+
+### API Key 测试安全
+
+线上配置中的 Key 可以用于远程验收，但不要复制到：
+
+- 测试脚本并提交到 Git；
+- shell 历史或命令参数；
+- 普通日志、错误信息或截图。
+
+本地 `ctypes` 测试必须使用占位 Key；线上批量测试只输出掩码 Key（前 8 位 + 后 4 位），并在远程进程内完成请求。测试结束后删除临时脚本、动态库和缓存。
 
 ---
 
-## 8. 流程纪律
+## 9. 流程纪律
 
 1. **绝不修改用户的 `config.yaml`。** 用户手动改；插件配置由 config watcher 触发
    `plugin.reconfigure` **热加载**，改完不需要重启服务（实测有效）。
@@ -275,21 +396,29 @@ CPA 默认日志格式会显示消息文本中的 `api_key_masked=... key_finger
 
 ---
 
-## 8. 常用命令速查
+## 10. 常用命令速查
 
 ```bash
 # 构建
 gcc -shared -fPIC -O2 -o key-model-restriction-c.so c/src/plugin.c
 
-# 部署
-scp key-model-restriction-c.so dev01@192.168.110.201:/home/dev01/cliproxyapi/plugins/
+# 部署前先记录本地产物哈希，并在远程保留备份
+sha256sum key-model-restriction-c.so
+ssh dev01@192.168.110.201 'sha256sum /home/dev01/cliproxyapi/config.yaml'
+ssh dev01@192.168.110.201 'mkdir -p /home/dev01/cliproxyapi/plugin-backups && cp -p /home/dev01/cliproxyapi/plugins/key-model-restriction-c.so /home/dev01/cliproxyapi/plugin-backups/key-model-restriction-c.so.<timestamp>'
+scp key-model-restriction-c.so dev01@192.168.110.201:/tmp/key-model-restriction-c.so
+ssh dev01@192.168.110.201 'install -m 0755 /tmp/key-model-restriction-c.so /home/dev01/cliproxyapi/plugins/key-model-restriction-c.so.new && mv -f /home/dev01/cliproxyapi/plugins/key-model-restriction-c.so.new /home/dev01/cliproxyapi/plugins/key-model-restriction-c.so && rm -f /tmp/key-model-restriction-c.so'
 
 # 重启 + 看日志（用户级 systemd）
-systemctl --user restart cliproxyapi
-journalctl --user -u cliproxyapi --no-pager -n 20
+ssh dev01@192.168.110.201 'systemctl --user restart cliproxyapi'
+ssh dev01@192.168.110.201 'journalctl --user -u cliproxyapi --no-pager -n 20'
+ssh dev01@192.168.110.201 'sha256sum /home/dev01/cliproxyapi/config.yaml /home/dev01/cliproxyapi/plugins/key-model-restriction-c.so; ss -tlnp | grep 8317'
 
-# 端到端测试（三种场景）
-curl -s -w "\nHTTP %{http_code}\n" \
+# 获取当前实际可用模型（线上验收优先于扫描静态配置）
+curl -sS -H "Authorization: Bearer <KEY>" http://192.168.110.201:8317/v1/models
+
+# 端到端测试（必须看完整 body 和状态码）
+curl -sS -w "\nHTTP %{http_code}\n" \
   -H "Authorization: Bearer <KEY>" -H 'Content-Type: application/json' \
   -d '{"model":"<MODEL>","messages":[{"role":"user","content":"hi"}]}' \
   http://192.168.110.201:8317/v1/chat/completions
@@ -300,7 +429,7 @@ strings /home/dev01/cliproxyapi/cli-proxy-api | grep -o '<field>' | wc -l
 
 ---
 
-## 9. 发布到插件商店（远程安装，而不是手工拷 `.so`）
+## 11. 发布到插件商店（远程安装，而不是手工拷 `.so`）
 
 宿主支持 "registry 索引 + GitHub Releases" 的安装方式，入口在管理 API：
 
@@ -327,6 +456,9 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 - `scripts/build-release.sh`：`zig cc` 单工具链交叉编译 6 个目标平台并打包
 - `.github/workflows/release.yml`：推 `v*` tag → 编译 → 断言布局 → 冒烟测试 → `gh release create`
 - `registry.example.json`：自建 registry 索引的样板
+- 发布前先在本地运行 `scripts/smoke-test.py`，再校验 6 个 zip 和 `checksums.txt`；不要把“CI 已触发”当成“Release 已发布”。
+- 发布后通过 `gh release view v<version>` 确认 6 个平台资产和 `checksums.txt` 都已上传，再让商店安装。
+- 同一个版本不要重复复用 tag；发现产物或配置错误时递增 patch 版本（例如 `1.4.0` → `1.4.1`），避免远端 Release 和本地代码不一致。
 
 **坑：本机 binutils 解析不了 Mach-O / ARM64 PE**（`file format not recognized`），
 所以校验 darwin/windows 产物时要自己解析导出表（见 `smoke-test.py` 思路），
@@ -344,14 +476,16 @@ Windows 上覆盖已加载的插件会被拒绝（`ErrLoadedPluginLocked` → 40
 
 ---
 
-## 10. 上线前 checklist
+## 12. 上线前 checklist
 
-- [ ] `gcc` 编译无 warning
-- [ ] 本地 ctypes 隔离测试通过（含边界：空 `allowed_models`、别名、不存在的 scoped key）
-- [ ] 远程三种场景回归：允许 → 非 403；不允许 → 403 **且 body 有内容**；无全局规则时未配置 key → 放行
-- [ ] 全局规则回归：未配置 key 继承 `default`；Key 专属规则覆盖 `default`；`unrestricted: true` 和旧 `allowed_models: []` 绕过全局规则；`denied_models` 优先；`Model`/`RequestedModel` 任一命中即拒绝；日志包含 `rule_source`
+- [ ] `gcc -Wall -Wextra -Werror` 编译无 warning
+- [ ] 本地 `ctypes` 隔离测试通过（使用占位 Key，不使用线上真实 Key）
+- [ ] 配置矩阵覆盖：普通允许、全局拒绝、Key 白名单覆盖、`unrestricted: true`、旧 `allowed_models: []`
+- [ ] 别名矩阵覆盖：`Model` 命中拒绝、`RequestedModel` 命中拒绝、两者不同；拒绝列表任一命中即拒绝
+- [ ] `codex-auto-review` 等特殊命名模型按精确配置验证，不按业务分类猜测
 - [ ] 403 body 里含 `code` 字段，便于客户端识别
-- [ ] `scripts/smoke-test.py` 通过（等价于宿主 dlopen + 函数表调用）
+- [ ] 同时核对插件 `host.log` 的 `decision` / `reason` / `rule_source` 与最终 HTTP body；HTTP 400 不单独作为放行证据
+- [ ] 远程更新前备份 `.so`，记录插件与 `config.yaml` 哈希；更新后确认插件版本、PID、8317 端口和配置哈希
 - [ ] 发布版：6 个平台 zip 齐全、`checksums.txt` 行数 = zip 个数、zip 根目录只有 `<id>.<ext>`
 - [ ] 若走商店安装：确认 `plugins.configs` 的键 = 插件 ID（不是 `.so` 旧文件名）
 - [ ] 改动已 commit，并写清"根因 + 验证方式"
