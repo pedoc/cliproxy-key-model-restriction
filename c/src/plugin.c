@@ -508,18 +508,29 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             return 0;
         }
         if (!model_allowed(kc, model)) {
+            // Build the allowed-model list for the error message.
+            char allowed_list[512] = "";
+            for (int i = 0; i < kc->model_count; i++) {
+                if (i > 0) {
+                    strncat(allowed_list, ", ", sizeof(allowed_list) - strlen(allowed_list) - 1);
+                }
+                strncat(allowed_list, kc->models[i], sizeof(allowed_list) - strlen(allowed_list) - 1);
+            }
             char* model_esc = json_escape(model);
+            char* allowed_esc = json_escape(allowed_list);
             char* body = format_string(
-                "{\"error\":{\"type\":\"forbidden\",\"message\":\"API key is not allowed to use model: %s\"}}",
-                model_esc ? model_esc : model);
-            // Base64-encode the response body (Go's []byte is base64 in JSON)
-            size_t body_len = strlen(body);
-            char* body_b64 = base64_encode_str(body, body_len);
+                "{\"error\":{\"type\":\"model_restriction\",\"code\":\"key_model_restriction\","
+                "\"message\":\"Blocked by key-model-restriction plugin: API key is not allowed to use model '%s'. Allowed models: [%s]\"}}",
+                model_esc ? model_esc : model,
+                allowed_esc ? allowed_esc : "");
+            // Response fields must use Go field names (Status_code/response_body are NOT matched
+            // because pluginapi.RequestInterceptResponse has no JSON tags). []byte fields are base64.
+            char* body_b64 = base64_encode_str(body, strlen(body));
             char* result = format_string(
-                "{\"ok\":true,\"result\":{\"terminate\":true,\"status_code\":403,\"response_body\":\"%s\"}}",
+                "{\"ok\":true,\"result\":{\"Terminate\":true,\"StatusCode\":403,\"ResponseBody\":\"%s\"}}",
                 body_b64 ? body_b64 : "");
             write_response(response, result);
-            free(model_esc); free(body); free(body_b64); free(result);
+            free(model_esc); free(allowed_esc); free(body); free(body_b64); free(result);
             free(model); free(caller_scope); free(metadata); free(json);
             return 0;
         }
