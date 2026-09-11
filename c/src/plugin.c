@@ -487,27 +487,38 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
-        // Extract model (JSON fields are PascalCase: "Model", "RequestedModel")
+        // Extract models (JSON fields are PascalCase: "Model" = resolved upstream model,
+        // "RequestedModel" = the model the client asked for before alias/pool rewriting).
         char* model = extract_json_string(json, "Model");
-        if (!model) model = extract_json_string(json, "RequestedModel");
+        char* requested_model = extract_json_string(json, "RequestedModel");
         // Extract caller_scope from metadata
         char* metadata = extract_json_object(json, "Metadata");
         char* caller_scope = NULL;
         if (metadata) {
             caller_scope = extract_json_string(metadata, "caller_scope");
         }
-        if (!caller_scope || strlen(caller_scope) == 0 || !model || strlen(model) == 0) {
-            free(model); free(caller_scope); free(metadata); free(json);
+        if (!caller_scope || strlen(caller_scope) == 0) {
+            free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
         const KeyConfig* kc = find_key_config(caller_scope);
         if (!kc) {
-            free(model); free(caller_scope); free(metadata); free(json);
+            free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
             write_response(response, "{\"ok\":true,\"result\":{}}");
             return 0;
         }
-        if (!model_allowed(kc, model)) {
+        // Allow when either the requested or the resolved model matches the allow-list.
+        int allowed = 0;
+        if (model && strlen(model) > 0 && model_allowed(kc, model)) {
+            allowed = 1;
+        }
+        if (!allowed && requested_model && strlen(requested_model) > 0 && model_allowed(kc, requested_model)) {
+            allowed = 1;
+        }
+        if (!allowed) {
+            // Report the model the client asked for when available.
+            const char* display_model = (requested_model && strlen(requested_model) > 0) ? requested_model : model;
             // Build the allowed-model list for the error message.
             char allowed_list[512] = "";
             for (int i = 0; i < kc->model_count; i++) {
@@ -516,12 +527,12 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
                 }
                 strncat(allowed_list, kc->models[i], sizeof(allowed_list) - strlen(allowed_list) - 1);
             }
-            char* model_esc = json_escape(model);
+            char* model_esc = json_escape(display_model ? display_model : "");
             char* allowed_esc = json_escape(allowed_list);
             char* body = format_string(
                 "{\"error\":{\"type\":\"model_restriction\",\"code\":\"key_model_restriction\","
                 "\"message\":\"Blocked by key-model-restriction plugin: API key is not allowed to use model '%s'. Allowed models: [%s]\"}}",
-                model_esc ? model_esc : model,
+                model_esc ? model_esc : "",
                 allowed_esc ? allowed_esc : "");
             // Response fields must use Go field names (Status_code/response_body are NOT matched
             // because pluginapi.RequestInterceptResponse has no JSON tags). []byte fields are base64.
@@ -531,10 +542,10 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
                 body_b64 ? body_b64 : "");
             write_response(response, result);
             free(model_esc); free(allowed_esc); free(body); free(body_b64); free(result);
-            free(model); free(caller_scope); free(metadata); free(json);
+            free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
             return 0;
         }
-        free(model); free(caller_scope); free(metadata); free(json);
+        free(model); free(requested_model); free(caller_scope); free(metadata); free(json);
         write_response(response, "{\"ok\":true,\"result\":{}}");
         return 0;
     }
