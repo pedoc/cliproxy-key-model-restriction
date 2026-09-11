@@ -16,10 +16,27 @@
 - 端到端测试要展示原始返回值（HTTP code + 完整 body）。
 
 ## 构建与验证
-- 构建：`gcc -shared -fPIC -O2 -o key-model-restriction-c.so c/src/plugin.c`
-- 插件 ID 由文件名决定：`key-model-restriction-c`（配置文件 `plugins.configs.key-model-restriction-c`）。
-- 本地快速验证：用 Python `ctypes` 直接 `dlopen` 该 `.so`，调 `cliproxy_plugin_init` 再调
-  `cliproxy_plugin_call`，比端到端调试快很多；记得先调 `plugin.register` 注入 `config_yaml`。
+- 本地构建：`gcc -shared -fPIC -O2 -o key-model-restriction-c.so c/src/plugin.c`
+- 发布构建：`VERSION=1.0.0 ./scripts/build-release.sh`（zig cc 交叉编译 6 平台，产出商店 zip + checksums.txt）
+- **ABI 只导出 `cliproxy_plugin_init`**：宿主 `loader_unix.go` 只 dlsym 这一个符号，
+  `call`/`free_buffer`/`shutdown` 由 init 回填函数表。`nm -D` 只有 1 个符号是**正常的**，别去"补齐"。
+- 插件 ID 由文件名决定（剥掉 `-v<version>`）：`key-model-restriction-c.so` → 配置键 `key-model-restriction-c`。
+- 验证产物用 `scripts/smoke-test.py <zip|.so>`：完整复刻 dlopen → init → 函数表调用，
+  比端到端调试快；注意请求字段是 **PascalCase**（`Model`/`RequestedModel`/`Metadata`），
+  元数据里的 key 才是 `caller_scope`。
+- 本机 binutils 解析不了 Mach-O / ARM64 PE，校验 darwin/windows 产物要自己解析二进制。
+
+## 发布到插件商店
+- 产物约定（`internal/pluginstore` 精确匹配，写错即 `release asset ... not found`）：
+  `<id>_<version>_<goos>_<goarch>.zip`、`checksums.txt`（`<sha256>  <文件名>` 两列）、
+  tag `v<version>`、zip **根目录**放 `<id>.<ext>` 且只能有一个动态库。
+- 落地路径 `plugins/<goos>/<goarch>/<id>-v<version>.so`（不再平铺）；插件 ID = 配置键。
+- CI：推 `v*` tag → `.github/workflows/release.yml` → 编译 / 断言布局 / 冒烟 / `gh release create`。
+- 管理接口：`GET /v0/management/plugin-store`、`POST /v0/management/plugin-store/:id/install`、
+  `DELETE /v0/management/plugins/:id`。
+- 商店安装会写 `plugins.configs.<id>.store`（source-id/source-url/version/release-tag），
+  这是更新检测与来源锁定的依据。
+- 私有仓库需 `plugins.store-auth`（`type: github-token` + `token-env`，只写变量名不写 token）。
 
 ## 关键技术约束
 - **插件 ABI 用 C**：Go 插件（`-buildmode=plugin`）与该服务有运行时冲突，会导致服务启动卡死。
