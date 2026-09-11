@@ -239,6 +239,15 @@ CPA Management Center 的 `ConfigField` 是 `object`，UI 编辑框实际填写�
 
 这个设计支持“全局禁止少量模型 + 单个 Key 全部放行”，也支持“某个 Key 只允许两个模型”。关键是不要把全局和 Key 列表混合计算，否则配置意图会变得不可读。
 
+### 配置顺序和 UI 保存注意事项
+
+`keys` 和 `default` 是两个顶层 section，解析时顺序不重要；用户配置中 `keys` 写在 `default` 前面也应得到相同结果。修改 UI 中的单个 object 时，要注意管理接口通常按顶层字段保存：
+
+- 保存 `default` 时不要意外覆盖 `keys`；
+- 保存 `keys` 时不要意外删除 `default`；
+- 修改后用日志里的 `rule_source` 验证实际采用的规则；
+- 若 UI 只提供整个插件对象编辑器，才一次性提交 `default` 和 `keys`。
+
 ### 为什么用户的配置里 `codex-auto-review` 会有两种结果
 
 `codex-auto-review` 没有出现在全局 `default.denied_models`，所以未配置 Key 使用全局规则时会放行。可是如果某个 Key 自己配置了：
